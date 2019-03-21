@@ -11,13 +11,13 @@ DriverEntry(
     NTSTATUS status = STATUS_SUCCESS;
 
     WDF_DRIVER_CONFIG_INIT(&config, rdAddDevice);
-    config.EvtDriverUnload = rdUnload;
 
     status = WdfDriverCreate(DriverObject,
         RegistryPath,
         WDF_NO_OBJECT_ATTRIBUTES, 
         &config,
-        WDF_NO_HANDLE);
+        WDF_NO_HANDLE
+        );
 
     if (!NT_SUCCESS(status))
     {
@@ -38,10 +38,10 @@ rdAddDevice(
     WDFDEVICE               device;
     WDF_OBJECT_ATTRIBUTES   queueAttr;
     WDF_IO_QUEUE_CONFIG     queueConfig;
-    PDEVICE_EXTENSION       pDevExt;
-    PQUEUE_EXTENSION        pQueueExt;
+    PDEVICE_EXTENSION       devExt;
+    PQUEUE_EXTENSION        queueExt;
     WDFQUEUE                queue;
-    DECLARE_CONST_UNICODE_STRING(devName, RAMDISK_DEVICE_NAME);
+    DECLARE_CONST_UNICODE_STRING(devName, NT_DEVICE_NAME);
 
     PAGED_CODE();
 
@@ -70,7 +70,7 @@ rdAddDevice(
         return status;
     }
 
-    pDevExt = DeviceGetExtention(device);
+    devExt = DeviceGetExtension(device);
 
     //初始化设备IO队列
     WDF_IO_QUEUE_CONFIG_INIT_DEFAULT_QUEUE(&queueConfig, WdfIoQueueDispatchSequential);
@@ -84,28 +84,58 @@ rdAddDevice(
     status = WdfIoQueueCreate(device,
         &queueConfig,
         &queueAttr,
-        &queue);
+        &queue
+        );
     if (!NT_SUCCESS(status))
     {
         MyDbgPrint("[RamDisk]WdfIoQueueCreate failed.");
         return status;
     }
 
-    pQueueExt = QueueGetExtension(queue);
-
-    pQueueExt->DeviceExtension = pDevExt;
+    queueExt = QueueGetExtension(queue);
+    queueExt->DeviceExtension = devExt;
 
     //初始化磁盘
+    devExt->DiskRegInfo.DriveLetter.Buffer = (PWSTR)&devExt->DriveLetterBuffer;
+    devExt->DiskRegInfo.DriveLetter.MaximumLength = sizeof(devExt->DriveLetterBuffer);
+
+    //查询RamDisk磁盘配置参数
+    rdQueryDiskParameter(
+        WdfDriverGetRegistryPath(WdfDeviceGetDriver(device)),
+        &devExt->DiskRegInfo
+        );
+
+    devExt->DiskImage = ExAllocatePoolWithTag(
+        NonPagedPool,
+        devExt->DiskRegInfo.DiskSize,
+        RAMDISK_TAG
+        );
+
+    if (devExt->DiskImage) 
+    {
+
+        UNICODE_STRING deviceName;
+        UNICODE_STRING win32Name;
+
+        rdFormatDisk(devExt);
+
+        status = STATUS_SUCCESS;
+
+        //创建RamDisk磁盘符号链接
+        RtlInitUnicodeString(&win32Name, DOS_DEVICE_NAME);
+        RtlInitUnicodeString(&deviceName, NT_DEVICE_NAME);
+
+        devExt->SymbolicLink.Buffer         = (PWSTR)&devExt->DosDeviceNameBuffer;
+        devExt->SymbolicLink.MaximumLength  = sizeof(devExt->DosDeviceNameBuffer);
+        devExt->SymbolicLink.Length         = win32Name.Length;
+
+        RtlCopyUnicodeString(&devExt->SymbolicLink, &win32Name);
+        RtlAppendUnicodeStringToString(&devExt->SymbolicLink, &devExt->DiskRegInfo.DriveLetter);
+
+        status = WdfDeviceCreateSymbolicLink(device, &devExt->SymbolicLink);
+    }
 
     return status;
-}
-
-VOID
-rdUnload(
-    IN WDFDRIVER Driver
-)
-{
-
 }
 
 VOID
@@ -113,7 +143,12 @@ rdEvtCleanup(
     IN WDFOBJECT Device
 )
 {
+    PDEVICE_EXTENSION devExt = (PDEVICE_EXTENSION)DeviceGetExtension(Device);
 
+    if (devExt->DiskImage)
+    {
+        ExFreePool(devExt->DiskImage);
+    }
 }
 
 VOID
@@ -123,7 +158,30 @@ rdEvtIoRead(
     IN size_t Length
 )
 {
+    NTSTATUS                status = STATUS_INVALID_PARAMETER;
+    PDEVICE_EXTENSION       devExt = ((PQUEUE_EXTENSION)QueueGetExtension(Queue))->DeviceExtension;
+    WDF_REQUEST_PARAMETERS  params;
+    LARGE_INTEGER           byteOffset;
+    WDFMEMORY               wdfMem;
 
+    WDF_REQUEST_PARAMETERS_INIT(&params);
+    WdfRequestGetParameters(Request, &params);
+
+    byteOffset.QuadPart = params.Parameters.Read.DeviceOffset;
+
+    if (byteOffset.QuadPart + (LONGLONG)Length <= devExt->DiskRegInfo.DiskSize)
+    {
+        status = WdfRequestRetrieveInputMemory(Request, &wdfMem);
+        if (NT_SUCCESS(status))
+        {
+            status = WdfMemoryCopyFromBuffer(wdfMem,
+                0, 
+                devExt->DiskImage + byteOffset.QuadPart,
+                Length
+                );
+        }
+    }
+    WdfRequestCompleteWithInformation(Request, status, (ULONG_PTR)Length);
 }
 
 VOID
@@ -133,7 +191,30 @@ rdEvtIoWrite(
     IN size_t Length
 )
 {
+    NTSTATUS                status = STATUS_INVALID_PARAMETER;
+    PDEVICE_EXTENSION       devExt = ((PQUEUE_EXTENSION)QueueGetExtension(Queue))->DeviceExtension;
+    WDF_REQUEST_PARAMETERS  params;
+    LARGE_INTEGER           byteOffset;
+    WDFMEMORY               wdfMem;
 
+    WDF_REQUEST_PARAMETERS_INIT(&params);
+    WdfRequestGetParameters(Request, &params);
+
+    byteOffset.QuadPart = params.Parameters.Write.DeviceOffset;
+
+    if (byteOffset.QuadPart + (LONGLONG)Length <= devExt->DiskRegInfo.DiskSize)
+    {
+        status = WdfRequestRetrieveInputMemory(Request, &wdfMem);
+        if (NT_SUCCESS(status))
+        {
+            status = WdfMemoryCopyToBuffer(wdfMem,
+                0,
+                devExt->DiskImage + byteOffset.QuadPart,
+                Length
+            );
+        }
+    }
+    WdfRequestCompleteWithInformation(Request, status, (ULONG_PTR)Length);
 }
 
 VOID
@@ -145,7 +226,120 @@ rdEvtIoDeviceControl(
     IN ULONG IoControlCode
 )
 {
+    NTSTATUS          status        = STATUS_INVALID_DEVICE_REQUEST;
+    ULONG_PTR         information   = 0;
+    size_t            bufSize;
+    PDEVICE_EXTENSION devExt        = QueueGetExtension(Queue)->DeviceExtension;
 
+    UNREFERENCED_PARAMETER(OutputBufferLength);
+    UNREFERENCED_PARAMETER(InputBufferLength);
+
+    switch (IoControlCode) 
+    {
+    case IOCTL_DISK_GET_PARTITION_INFO:
+    {
+
+        PPARTITION_INFORMATION outputBuffer;
+
+        information = sizeof(PARTITION_INFORMATION);
+
+        status = WdfRequestRetrieveOutputBuffer(Request, sizeof(PARTITION_INFORMATION), &outputBuffer, &bufSize);
+        if (NT_SUCCESS(status)) 
+        {
+            outputBuffer->PartitionType             = PARTITION_FAT32;
+            outputBuffer->BootIndicator             = FALSE;
+            outputBuffer->RecognizedPartition       = TRUE;
+            outputBuffer->RewritePartition          = FALSE;
+            outputBuffer->StartingOffset.QuadPart   = 0;
+            outputBuffer->PartitionLength.QuadPart  = devExt->DiskRegInfo.DiskSize;
+            outputBuffer->HiddenSectors             = (ULONG)(1L);
+            outputBuffer->PartitionNumber           = (ULONG)(-1L);
+
+            status = STATUS_SUCCESS;
+        }
+    }
+        break;
+
+    case IOCTL_DISK_GET_DRIVE_GEOMETRY:
+    {
+
+        PDISK_GEOMETRY outputBuffer;
+
+        information = sizeof(DISK_GEOMETRY);
+
+        status = WdfRequestRetrieveOutputBuffer(Request, sizeof(DISK_GEOMETRY), &outputBuffer, &bufSize);
+        if (NT_SUCCESS(status)) 
+        {
+            RtlCopyMemory(outputBuffer, &(devExt->DiskGeometry), sizeof(DISK_GEOMETRY));
+            status = STATUS_SUCCESS;
+        }
+    }
+        break;
+
+    case IOCTL_DISK_CHECK_VERIFY:
+    case IOCTL_DISK_IS_WRITABLE:
+        status = STATUS_SUCCESS;
+        break;
+    }
+
+    WdfRequestCompleteWithInformation(Request, status, information);
+}
+
+VOID
+rdQueryDiskParameter(
+    IN PWSTR RegistryPath,
+    IN PDISK_INFO DiskInfo
+)
+{
+    NTSTATUS status;
+    RTL_QUERY_REGISTRY_TABLE queryRegTable[4 + 1];
+
+    queryRegTable[0].Flags          = RTL_QUERY_REGISTRY_SUBKEY;
+    queryRegTable[0].Name           = L"Parameters";
+    queryRegTable[0].EntryContext   = NULL;
+    queryRegTable[0].DefaultType    = (ULONG)0;
+    queryRegTable[0].DefaultData    = NULL;
+    queryRegTable[0].DefaultLength  = (ULONG)0;
+
+    queryRegTable[1].Flags = RTL_QUERY_REGISTRY_DIRECT;
+    queryRegTable[1].Name = L"DiskSize";
+    queryRegTable[1].EntryContext = &DiskInfo->DiskSize;
+    queryRegTable[1].DefaultType = REG_QWORD;
+    queryRegTable[1].DefaultData = &DiskInfo->DiskSize;
+    queryRegTable[1].DefaultLength = sizeof(LONGLONG);
+
+    queryRegTable[2].Flags = RTL_QUERY_REGISTRY_DIRECT;
+    queryRegTable[2].Name = L"SectorsPerCluster";
+    queryRegTable[2].EntryContext = &DiskInfo->SectorsPerCluster;
+    queryRegTable[2].DefaultType = REG_DWORD;
+    queryRegTable[2].DefaultData = &DiskInfo->SectorsPerCluster;
+    queryRegTable[2].DefaultLength = sizeof(ULONG);
+
+    queryRegTable[3].Flags = RTL_QUERY_REGISTRY_DIRECT;
+    queryRegTable[3].Name = L"DriveLetter";
+    queryRegTable[3].EntryContext = &DiskInfo->DriveLetter;
+    queryRegTable[3].DefaultType = REG_SZ;
+    queryRegTable[3].DefaultData = DiskInfo->DriveLetter.Buffer;
+    queryRegTable[3].DefaultLength = 0;
+
+    status = RtlQueryRegistryValues(
+        RTL_REGISTRY_ABSOLUTE | RTL_REGISTRY_OPTIONAL,
+        RegistryPath,
+        queryRegTable,
+        NULL,
+        NULL
+    );
+
+    if (!NT_SUCCESS(status))
+    {
+        DiskInfo->DiskSize          = DEFAULT_DISK_SIZE;
+        DiskInfo->SectorsPerCluster = DEFAULT_SECTORS_PER_CLUSTER;
+        RtlInitUnicodeString(&DiskInfo->DriveLetter, DEFAULT_DRIVE_LETTER);
+    }
+
+    KdPrint(("DiskSize          = 0x%lx\n", DiskInfo->DiskSize));
+    KdPrint(("SectorsPerCluster = 0x%lx\n", DiskInfo->SectorsPerCluster));
+    KdPrint(("DriveLetter       = %wZ\n"  , &(DiskInfo->DriveLetter)));
 }
 
 VOID
@@ -157,15 +351,15 @@ rdFormatDisk(
     PFSINFO_SECTOR      fsInfoSector = (PFSINFO_SECTOR)(DevExt->DiskImage + DEFAULT_SECTOR_SIZE);
     PUCHAR              firstFatSector; //FAT表起始扇区
     PDIR_ENTRY          rootDir;        //根目录所在扇区
-    ULONG               fatSecCnt;      //扇区总数
 
     PAGED_CODE();
+
     ASSERT(sizeof(BOOT_SECTOR_FAT32) != DEFAULT_SECTOR_SIZE);
     ASSERT(sizeof(FSINFO_SECTOR) != DEFAULT_SECTOR_SIZE);
     ASSERT(bootSector != NULL);
 
     //格式化保留扇区
-    RtlZeroMemory(DevExt->DiskRegInfo.DiskSize, DEFAULT_SECTOR_SIZE * DEFAULT_REVERSED_SECTOR);
+    RtlZeroMemory(DevExt->DiskImage, DEFAULT_SECTOR_SIZE * DEFAULT_REVERSED_SECTOR);
 
     //初始化磁盘所有参数
     //硬盘容量 ＝ 柱面/磁道数 * 扇区数 * 每扇区字节数 * 磁头数
@@ -175,11 +369,11 @@ rdFormatDisk(
     DevExt->DiskGeometry.MediaType          = RAMDISK_MEDIA_TYPE;
     DevExt->DiskGeometry.Cylinders.QuadPart = DevExt->DiskRegInfo.DiskSize / (DEFAULT_SECTOR_SIZE * 32 * 1); //柱面数
 
-    MyDbgPrint(
+    KdPrint((
         "[RamDisk]Cylinders: %I64d\n TracksPerCylinder: %lu\n SectorsPerTrack: %lu\n BytesPerSector: %lu\n",
         DevExt->DiskGeometry.Cylinders.QuadPart, DevExt->DiskGeometry.TracksPerCylinder,
         DevExt->DiskGeometry.SectorsPerTrack, DevExt->DiskGeometry.BytesPerSector
-        );
+        ));
 
     //初始化DBR扇区
     bootSector->bsJump[0] = 0xEB;

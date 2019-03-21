@@ -4,7 +4,7 @@
 #include <wdf.h>
 #include <ntdddisk.h>
 
-#define RAMDISK_DEVICE_NAME             L"\\Device\\RamDisk"
+#define NT_DEVICE_NAME                  L"\\Device\\RamDisk"
 #define DOS_DEVICE_NAME                 L"\\DosDevices\\"
 #define RAMDISK_TAG                     'DmaR'  // "RamD"
 #define DOS_DEVNAME_LENGTH              (sizeof(DOS_DEVICE_NAME)+sizeof(WCHAR)*10)
@@ -29,7 +29,7 @@
 typedef struct _DISK_INFO {    
     ULONG           RootDirEntries;     // 根目录入口簇号
     ULONG           SectorsPerCluster;  // 每簇的扇区数
-    ULONGLONG       DiskSize;           // Ramdisk磁盘总大小
+    LONGLONG        DiskSize;           // Ramdisk磁盘总大小
     UNICODE_STRING  DriveLetter;        // 驱动器号, "X:"
 } DISK_INFO, *PDISK_INFO;
 
@@ -125,11 +125,6 @@ rdAddDevice(
 );
 
 VOID
-rdUnload(
-    IN WDFDRIVER Driver
-);
-
-VOID
 rdEvtCleanup(
     IN WDFOBJECT Device
 );
@@ -155,6 +150,12 @@ rdEvtIoDeviceControl(
     IN size_t OutputBufferLength,
     IN size_t InputBufferLength,
     IN ULONG IoControlCode
+);
+
+VOID
+rdQueryDiskParameter(
+    IN PWSTR RegPath,
+    IN PDISK_INFO DiskInfo
 );
 
 VOID
