@@ -19,12 +19,10 @@
     </Filter>
   </ItemGroup>
   <ItemGroup>
-    <Inf Include="RamDisk.inf">
-      <Filter>Driver Files</Filter>
-    </Inf>
-  </ItemGroup>
-  <ItemGroup>
     <ClInclude Include="RamDisk.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="forward_progress.h">
       <Filter>Header Files</Filter>
     </ClInclude>
   </ItemGroup>
@@ -32,5 +30,13 @@
     <ClCompile Include="RamDisk.c">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="forward_progress.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <Inf Include="RamDisk.inx">
+      <Filter>Driver Files</Filter>
+    </Inf>
   </ItemGroup>
 </Project>

@@ -1,54 +1,46 @@
-#pragma once
+#ifndef _RAM_DISK_H
+#define _RAM_DISK_H
 
-#include <wdm.h>
-#include <wdf.h>
+#include <ntddk.h>
 #include <ntdddisk.h>
 
-#define NT_DEVICE_NAME                  L"\\Device\\RamDisk"
+#include <wdm.h>
+
+#define NT_DEVICE_NAME                  L"\\Device\\WdmRamDisk"
 #define DOS_DEVICE_NAME                 L"\\DosDevices\\"
 #define RAMDISK_TAG                     'DmaR'  // "RamD"
 #define DOS_DEVNAME_LENGTH              (sizeof(DOS_DEVICE_NAME)+sizeof(WCHAR)*10)
 #define DRIVE_LETTER_LENGTH             (sizeof(WCHAR)*10)
-
 #define DRIVE_LETTER_BUFFER_SIZE        10
 #define DOS_DEVNAME_BUFFER_SIZE         (sizeof(DOS_DEVICE_NAME) / 2) + 10
-
 #define RAMDISK_MEDIA_TYPE              0xF8
-#define DIR_ENTRIES_PER_SECTOR          16
-
 #define DEFAULT_SECTOR_SIZE             512
-#define DEFAULT_REVERSED_SECTOR         16
-#define DEFAULT_DISK_SIZE               (100*1024*1024)     // 100 MB
+#define DEFAULT_REVERSED_SECTOR         32
+#define DEFAULT_DISK_SIZE               (500*1024*1024)     // 500 MB
 #define DEFAULT_ROOT_DIR_ENTRIES        512
 #define DEFAULT_SECTORS_PER_CLUSTER     2
-#define DEFAULT_DRIVE_LETTER            L"Y:"
+#define DEFAULT_DRIVE_LETTER            L"Z:"
 
-#define DBG_END_STRING  " File:%s, Line:%d"
-#define MyDbgPrint(s)   DbgPrint((s##DBG_END_STRING), __FILE__, __LINE__)
-
-typedef struct _DISK_INFO {    
+typedef struct _DISK_INFO {
     ULONG           RootDirEntries;     // 根目录入口簇号
     ULONG           SectorsPerCluster;  // 每簇的扇区数
     LONGLONG        DiskSize;           // Ramdisk磁盘总大小
-    UNICODE_STRING  DriveLetter;        // 驱动器号, "X:"
+    UNICODE_STRING  DriveLetter;        // 驱动器号, "Z:"
 } DISK_INFO, *PDISK_INFO;
 
 typedef struct _DEVICE_EXTENSION {
+    PDEVICE_OBJECT      SourceDevice;               // RamDisk设备
+    PDEVICE_OBJECT      TargetDevice;               // 底层PDO设备
+    PDEVICE_OBJECT      TopDevice;                  // 设备栈顶层设备  
+    UNICODE_STRING      SymbolicLink;               // DOS符号名
+    KEVENT              SyncEvent;                  // 同步IO请求
+    IO_REMOVE_LOCK      DeviceRemoveLock;           // 设备删除锁
     PUCHAR              DiskImage;                  // 磁盘映像的起始地址
     DISK_GEOMETRY       DiskGeometry;               // Ramdisk磁盘参数
     DISK_INFO           DiskRegInfo;                // Ramdisk注册表参数
-    UNICODE_STRING      SymbolicLink;               // DOS符号名
     WCHAR               DriveLetterBuffer[DRIVE_LETTER_BUFFER_SIZE];
     WCHAR               DosDeviceNameBuffer[DOS_DEVNAME_BUFFER_SIZE];
 } DEVICE_EXTENSION, *PDEVICE_EXTENSION;
-
-WDF_DECLARE_CONTEXT_TYPE_WITH_NAME(DEVICE_EXTENSION, DeviceGetExtension)
-
-typedef struct _QUEUE_EXTENSION {
-    PDEVICE_EXTENSION DeviceExtension;
-} QUEUE_EXTENSION, *PQUEUE_EXTENSION;
-
-WDF_DECLARE_CONTEXT_TYPE_WITH_NAME(QUEUE_EXTENSION, QueueGetExtension)
 
 #pragma pack(1)
 
@@ -63,7 +55,7 @@ typedef struct  _BOOT_SECTOR_FAT32
     CCHAR       bsOemName[8];       // 文件系统标志和版本号，RMDK1.0
     USHORT      bsBytesPerSec;      // 每扇区字节数，512
     UCHAR       bsSecPerClus;       // 每簇扇区数，8
-    USHORT      bsResSectors;       // 保留扇区数，16
+    USHORT      bsResSectors;       // 保留扇区数，32
     UCHAR       bsFATs;             // FAT表个数，1
     USHORT      bsRootDirEnts;      // FAT32必须等于0,FAT12/FAT16为根目录中目录的个数
     USHORT      bsSectors;          // FAT32必须等于0,FAT12/FAT16为扇区总数
@@ -72,7 +64,7 @@ typedef struct  _BOOT_SECTOR_FAT32
     USHORT      bsSecPerTrack;      // 每磁道扇区数，32
     USHORT      bsHeads;            // 磁头数，1
     ULONG       bsHiddenSecs;       // EBR分区之前所隐藏的扇区数
-    ULONG       bsHugeSectors;      // 文件系统总扇区数
+    ULONG       bsHugeSectors;      // 文件系统总扇区数 0x24
     //----------------------------------------------------------------
     //此部分FAT32特有（区别于FAT12/16）
     ULONG       bsSecPerFAT;        // 每个FAT表占用扇区数
@@ -81,7 +73,7 @@ typedef struct  _BOOT_SECTOR_FAT32
     ULONG       bsRootDirClus;      // 根目录所在第一个簇的簇号，2
     USHORT      bsFsInfoSec;        // FSINFO（文件系统信息扇区）扇区号1
     USHORT      bsBackBootSec;      // 备份引导扇区的位置。备份引导扇区总是位于文件系统 的6号扇区
-    UCHAR       bsFAT32Ext[12];     // 12字节，用于以后FAT 扩展使用
+    UCHAR       bsFAT32Ext[12];     // 12字节，用于以后FAT 扩展使用 0x1c
     //----------------------------------------------------------------
     UCHAR       bsDriveNumber;      // Drive Number - not used
     UCHAR       bsReserved1;        // Reserved
@@ -89,7 +81,7 @@ typedef struct  _BOOT_SECTOR_FAT32
     ULONG       bsVolumeID;         // 卷序列号，通常为一个随机值，0x12345678
     CCHAR       bsLabel[11];        // 卷标（ASCII码），如果建立文件系统的时候指定了卷 标，会保存在此
     CCHAR       bsFileSystemType[8];// 文件系统格式的ASCII码，FAT32
-    CCHAR       bsReserved2[410];   // 保留字段
+    CCHAR       bsReserved2[420];   // 保留字段
     UCHAR       bsSig2[2];          // 签名标志 - 0x55, 0xAA
 } BOOT_SECTOR_FAT32, *PBOOT_SECTOR_FAT32;
 
@@ -118,47 +110,26 @@ typedef struct  _DIR_ENTRY
 
 #pragma pack()
 
-NTSTATUS
-rdAddDevice(
-    IN WDFDRIVER Driver,
-    IN OUT PWDFDEVICE_INIT DeviceInit
-);
+DRIVER_INITIALIZE DriverEntry;
 
-VOID
-rdEvtCleanup(
-    IN WDFOBJECT Device
-);
+DRIVER_ADD_DEVICE rdAddDevice;
 
-VOID
-rdEvtIoRead(
-    IN WDFQUEUE Queue,
-    IN WDFREQUEST Request,
-    IN size_t Length
-);
+DRIVER_UNLOAD rdUnload;
 
-VOID
-rdEvtIoWrite(
-    IN WDFQUEUE Queue,
-    IN WDFREQUEST Request,
-    IN size_t Length
-);
+DRIVER_DISPATCH rdReadWrite;
 
-VOID
-rdEvtIoDeviceControl(
-    IN WDFQUEUE Queue,
-    IN WDFREQUEST Request,
-    IN size_t OutputBufferLength,
-    IN size_t InputBufferLength,
-    IN ULONG IoControlCode
-);
+DRIVER_DISPATCH rdFlushBuffers;
 
-VOID
-rdQueryDiskParameter(
-    IN PWSTR RegPath,
-    IN PDISK_INFO DiskInfo
-);
+DRIVER_DISPATCH rdDeviceControl;
 
-VOID
-rdFormatDisk(
-    IN PDEVICE_EXTENSION DevExt
-);
+DRIVER_DISPATCH rdCreateClose;
+
+DRIVER_DISPATCH rdPnp;
+
+DRIVER_DISPATCH rdPower;
+
+DRIVER_DISPATCH rdSystemControl;
+
+DRIVER_DISPATCH rdScsi;
+
+#endif // _RAM_DISK_H
