@@ -22,20 +22,14 @@
     <ClInclude Include="RamDisk.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="forward_progress.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="RamDisk.c">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="forward_progress.c">
-      <Filter>Source Files</Filter>
-    </ClCompile>
   </ItemGroup>
   <ItemGroup>
-    <Inf Include="RamDisk.inx">
+    <Inf Include="WdfRamDisk.inx">
       <Filter>Driver Files</Filter>
     </Inf>
   </ItemGroup>

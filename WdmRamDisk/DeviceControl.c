@@ -18,4 +18,12 @@ rdDeviceControl(
         IoCompleteRequest(Irp, IO_NO_INCREMENT);
         return status;
     }
+ 
+    switch (irpsp->Parameters.DeviceIoControl.IoControlCode)
+    {
+    case IOCTL_VIRTUAL_DISK_CREATE_DISK:
+        break;
+    default:
+        break;
+    }
 }

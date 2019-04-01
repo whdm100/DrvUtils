@@ -30,16 +30,16 @@ DriverEntry(
     }
     RtlCopyUnicodeString(&DriverRegistryPath, &RegistryPath);
     
-    DriverObject->MajorFunction[IRP_MJ_CREATE] = rdCreateClose;
-    DriverObject->MajorFunction[IRP_MJ_CLOSE] = rdCreateClose;
-    DriverObject->MajorFunction[IRP_MJ_READ] = rdReadWrite;
-    DriverObject->MajorFunction[IRP_MJ_WRITE] = rdReadWrite;
-    DriverObject->MajorFunction[IRP_MJ_FLUSH_BUFFERS] = rdFlushBuffers;
-    DriverObject->MajorFunction[IRP_MJ_DEVICE_CONTROL] = rdDeviceControl;
-    DriverObject->MajorFunction[IRP_MJ_PNP] = rdPnp;
-    DriverObject->MajorFunction[IRP_MJ_POWER] = rdPower;
-    DriverObject->MajorFunction[IRP_MJ_SCSI] = rdScsi;
-    DriverObject->MajorFunction[IRP_MJ_SYSTEM_CONTROL] = rdSystemControl;
+    DriverObject->MajorFunction[IRP_MJ_CREATE]          = rdCreateClose;
+    DriverObject->MajorFunction[IRP_MJ_CLOSE]           = rdCreateClose;
+    DriverObject->MajorFunction[IRP_MJ_READ]            = rdReadWrite;
+    DriverObject->MajorFunction[IRP_MJ_WRITE]           = rdReadWrite;
+    DriverObject->MajorFunction[IRP_MJ_FLUSH_BUFFERS]   = rdFlushBuffers;
+    DriverObject->MajorFunction[IRP_MJ_DEVICE_CONTROL]  = rdDeviceControl;
+    DriverObject->MajorFunction[IRP_MJ_PNP]             = rdPnp;
+    DriverObject->MajorFunction[IRP_MJ_POWER]           = rdPower;
+    DriverObject->MajorFunction[IRP_MJ_SCSI]            = rdScsi;
+    DriverObject->MajorFunction[IRP_MJ_SYSTEM_CONTROL]  = rdSystemControl;
 
     DriverObject->DriverUnload = rdUnload;
     DriverObject->DriverExtension->AddDevice = rdAddDevice;

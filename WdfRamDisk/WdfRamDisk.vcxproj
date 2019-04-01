@@ -161,12 +161,10 @@
     <FilesToPackage Include="$(TargetPath)" />
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="forward_progress.h" />
-    <ClInclude Include="WdfRamDisk.h" />
+    <ClInclude Include="RamDisk.h" />
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="forward_progress.c" />
-    <ClCompile Include="WdfRamDisk.c" />
+    <ClCompile Include="RamDisk.c" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
