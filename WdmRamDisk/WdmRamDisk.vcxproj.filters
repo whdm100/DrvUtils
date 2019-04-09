@@ -35,5 +35,8 @@
     <ClCompile Include="DeviceControl.c">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="ReadWrite.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
 </Project>

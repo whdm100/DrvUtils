@@ -141,6 +141,7 @@
   <ItemGroup>
     <ClCompile Include="DeviceControl.c" />
     <ClCompile Include="DriverEntry.c" />
+    <ClCompile Include="ReadWrite.c" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="RamDisk.h" />

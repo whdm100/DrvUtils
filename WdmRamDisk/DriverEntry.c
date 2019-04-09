@@ -127,7 +127,9 @@ rdQueryDiskParameter(
 
     KdPrint(("DiskSize          = 0x%lx\n", DiskInfo->DiskSize));
     KdPrint(("SectorsPerCluster = 0x%lx\n", DiskInfo->SectorsPerCluster));
-    KdPrint(("DriveLetter       = %wZ\n", &(DiskInfo->DriveLetter)));
+    KdPrint(("DriveLetter       = %wZ\n"  , &(DiskInfo->DriveLetter)));
+
+    return status;
 }
 
 NTSTATUS
@@ -141,7 +143,8 @@ rdAddDevice(
     PDEVICE_OBJECT topObject;
     PDEVICE_EXTENSION deviceExtension;
     DECLARE_CONST_UNICODE_STRING(deviceName, NT_DEVICE_NAME);
-
+    DECLARE_CONST_UNICODE_STRING(sddl, SDDL_ALL);
+    
     PAGED_CODE();
 
     if (RamDiskBusFdo != NULL)
@@ -149,13 +152,15 @@ rdAddDevice(
         return STATUS_DEVICE_ALREADY_ATTACHED;
     }
 
-    status = IoCreateDevice(
+    status = IoCreateDeviceSecure(
         DriverObject, 
         sizeof(DEVICE_EXTENSION), 
         &deviceName, 
-        FILE_DEVICE_BUS_EXTENDER, 
+        FILE_DEVICE_DISK, 
         FILE_DEVICE_SECURE_OPEN,
         FALSE, 
+        &sddl,
+        (LPCGUID)&GUID_CLASS_WDMRAMDISK,
         &sourceObject
     );
     if (!NT_SUCCESS(status))
@@ -200,5 +205,40 @@ rdAddDevice(
     RamDiskBusFdo = sourceObject;
 
     status = STATUS_SUCCESS;
+    return status;
+}
+
+VOID
+rdUnload(
+    IN PDRIVER_OBJECT DriverObject
+)
+{
+    if (DriverRegistryPath.Buffer)
+        ExFreePoolWithTag(DriverRegistryPath.Buffer, RAMDISK_TAG);
+}
+
+NTSTATUS rdCreateRamDisk(
+    IN PDEVICE_EXTENSION deviceExtension
+)
+{
+    NTSTATUS status;
+
+    //³õÊ¼»¯´ÅÅÌ
+    deviceExtension->DiskRegInfo.DriveLetter.Buffer = (PWSTR)&deviceExtension->DriveLetterBuffer;
+    deviceExtension->DiskRegInfo.DriveLetter.MaximumLength = sizeof(deviceExtension->DriveLetterBuffer);
+
+    //²éÑ¯RamDisk´ÅÅÌÅäÖÃ²ÎÊý
+    rdQueryDiskParameter(DriverRegistryPath.Buffer, &deviceExtension->DiskRegInfo);
+
+    deviceExtension->DiskImage = ExAllocatePoolWithTag(
+        NonPagedPool,
+        deviceExtension->DiskRegInfo.DiskSize,
+        RAMDISK_TAG
+    );
+
+    if (deviceExtension->DiskImage)
+    {
+        status = STATUS_SUCCESS;
+    }
     return status;
 }
