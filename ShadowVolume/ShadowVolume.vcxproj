@@ -139,11 +139,11 @@
     <FilesToPackage Include="$(TargetPath)" />
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="Bitmap.h" />
+    <ClInclude Include="DiskBitmap.h" />
     <ClInclude Include="ShadowVolume.h" />
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="Bitmap.c" />
+    <ClCompile Include="DiskBitmap.c" />
     <ClCompile Include="Dispatch.c" />
     <ClCompile Include="DriverEntry.c" />
   </ItemGroup>

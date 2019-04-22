@@ -27,7 +27,7 @@
     <ClInclude Include="ShadowVolume.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="Bitmap.h">
+    <ClInclude Include="DiskBitmap.h">
       <Filter>Header Files</Filter>
     </ClInclude>
   </ItemGroup>
@@ -38,7 +38,7 @@
     <ClCompile Include="Dispatch.c">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="Bitmap.c">
+    <ClCompile Include="DiskBitmap.c">
       <Filter>Source Files</Filter>
     </ClCompile>
   </ItemGroup>

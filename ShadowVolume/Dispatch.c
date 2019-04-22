@@ -286,32 +286,32 @@ ToUpperLetter(
 NTSTATUS
 QueryVolumeInformation(
     IN PDEVICE_OBJECT DeviceObject,
-    OUT PULONG SizePerCluster,
+    OUT PULONG SectorsPerCluster,
     OUT PULONG SizePerSector,
     OUT PLARGE_INTEGER VolumeTotalSize
 )
 {
     NTSTATUS            status          = STATUS_SUCCESS;
     PIRP                irp             = NULL;
-    PUCHAR              bootSectorBuffer= NULL;
+    PUCHAR              bootSectorBuff  = NULL;
     PBOOT_SECTOR_FAT    bootSectorFat;      
     PBOOT_SECTOR_FAT32  bootSectorFat32;
-    PBOOT_SECTOR_NTFS   bootSectorNTFS;
+    PBOOT_SECTOR_NTFS   bootSectorNtfs;
     LARGE_INTEGER       startOffset;
     IO_STATUS_BLOCK     ioStatusBlock;
     KEVENT              waitEvent;
 
     do 
     {
-        bootSectorBuffer = ExAllocatePool(NonPagedPool, DEFAULT_SECTOR_SIZE);
-        if (!bootSectorBuffer)
+        bootSectorBuff = ExAllocatePool(NonPagedPool, DEFAULT_SECTOR_SIZE);
+        if (!bootSectorBuff)
             break;
 
         startOffset.QuadPart = 0;
         irp = IoBuildAsynchronousFsdRequest(
             IRP_MJ_READ,
             DeviceObject,
-            bootSectorBuffer,
+            bootSectorBuff,
             DEFAULT_SECTOR_SIZE,
             &startOffset,
             &ioStatusBlock
@@ -341,8 +341,44 @@ QueryVolumeInformation(
         if (!NT_SUCCESS(irp->IoStatus.Status))
             break;
 
+        bootSectorFat = (PBOOT_SECTOR_FAT)bootSectorBuff;
+        bootSectorFat32 = (PBOOT_SECTOR_FAT32)bootSectorBuff;
+        bootSectorNtfs = (PBOOT_SECTOR_NTFS)bootSectorBuff;
+
+        if (*(ULONG*)bootSectorFat->bsFileSystemType == '1TAF')
+        {
+            *SectorsPerCluster          = bootSectorFat->bsSecPerClus;
+            *SizePerSector              = bootSectorFat->bsBytesPerSec;
+            VolumeTotalSize->QuadPart   = (LONGLONG)bootSectorFat->bsHugeSectors * ((LONGLONG)*SizePerSector);
+        }
+        else if (*(ULONG*)bootSectorFat32->bsFileSystemType == '3TAF')
+        {
+            *SectorsPerCluster          = bootSectorFat32->bsSecPerClus;
+            *SizePerSector              = bootSectorFat32->bsBytesPerSec;
+            VolumeTotalSize->QuadPart   = (LONGLONG)bootSectorFat32->bsHugeSectors * ((LONGLONG)*SizePerSector);
+        }
+        else if (*(ULONG*)bootSectorNtfs->bsFSID == 'SFTN')
+        {
+            *SectorsPerCluster          = bootSectorNtfs->bsSectorsPerCluster;
+            *SizePerSector              = bootSectorNtfs->bsBytesPerSector;
+            VolumeTotalSize->QuadPart   = (LONGLONG)bootSectorNtfs->bsTotalSectors * ((LONGLONG)*SizePerSector);
+        }
+        else
+        {
+            status = STATUS_UNSUCCESSFUL;
+        }
+
     } while (FALSE);
 
+    if (irp != NULL)
+    {
+        IoFreeIrp(irp);
+    }
+    
+    if (bootSectorBuff != NULL)
+    {
+        ExFreePool(bootSectorBuff);
+    }
 
     return status;
 }
@@ -370,26 +406,26 @@ svDispatchDeviceControlCompleteRoutine(
 
         status = QueryVolumeInformation(
             deviceExtension->TargetDevice,
-            &deviceExtension->SizePerCluster,
-            &deviceExtension->SizePerSector,
+            &deviceExtension->SectorsPerCluster,
+            &deviceExtension->BytesPerSector,
             &deviceExtension->VolumeTotalSize
         );
 
         if (NT_SUCCESS(status))
         {
-
-        }
-
+            deviceExtension->DiskBitmap = CreateDiskBitmap(
+                deviceExtension->VolumeTotalSize.QuadPart / 
+                ((LONGLONG)deviceExtension->SectorsPerCluster * (LONGLONG)deviceExtension->BytesPerSector)
+            );
+        }        
+    }
+    
+    if (VolumeDosName.Buffer != NULL)
+    {
         ExFreePool(VolumeDosName.Buffer);
     }
     
-    KeWaitForSingleObject(
-        context->SyncEvent,
-        Executive,
-        KernelMode,
-        FALSE,
-        NULL
-    );
+    KeSetEvent(context->SyncEvent, IO_NO_INCREMENT, FALSE);
 
     return status;
 }
