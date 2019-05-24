@@ -3,10 +3,15 @@
 
 #ifdef ALLOC_PRAGMA
 #pragma alloc_text(INIT, DriverEntry)
-#pragma alloc_text(PAGE, rdAddDevice)
+#pragma alloc_text(PAGE, svAddDevice)
 #pragma alloc_text(PAGE, svReinitializationRoutine)
-#pragma alloc_text(PAGE, rdUnload)
+#pragma alloc_text(PAGE, svDiskFilterDriverReinit)
+#pragma alloc_text(PAGE, svDiskFilterDeviceInit)
+#pragma alloc_text(PAGE, svUnload)
 #endif //ALLOC_PRAGMA
+
+// 存放
+PDEVICE_EXTENSION g_devExt[MAX_PROTECT_VOLUMNE];
 
 NTSTATUS
 DriverEntry(
@@ -23,15 +28,18 @@ DriverEntry(
         DriverObject->MajorFunction[i] = svDispatchGeneral;
     }
 
-    DriverObject->MajorFunction[IRP_MJ_DEVICE_CONTROL] = svDispatchDeviceControl;
-    DriverObject->MajorFunction[IRP_MJ_READ] = svDispatchRead;
-    DriverObject->MajorFunction[IRP_MJ_WRITE] = svDispatchWrite;
-    DriverObject->MajorFunction[IRP_MJ_PNP] = svDispatchPnp;
-    DriverObject->MajorFunction[IRP_MJ_POWER] = svDispatchPower;
+    DriverObject->MajorFunction[IRP_MJ_DEVICE_CONTROL]  = svDispatchDeviceControl;
+    DriverObject->MajorFunction[IRP_MJ_READ]            = svDispatchReadWrite;
+    DriverObject->MajorFunction[IRP_MJ_WRITE]           = svDispatchReadWrite;
+    DriverObject->MajorFunction[IRP_MJ_PNP]             = svDispatchPnp;
+    DriverObject->MajorFunction[IRP_MJ_POWER]           = svDispatchPower;
 
-    DriverObject->DriverUnload = svUnload;
-    DriverObject->DriverExtension->AddDevice = svAddDevice;
+    DriverObject->DriverUnload                          = svUnload;
+    DriverObject->DriverExtension->AddDevice            = svAddDevice;
 
+    RtlZeroMemory(g_devExt, sizeof(g_devExt));
+
+    //注册Boot驱动结束回调，在所有Boot驱动运行完成后再执行
     IoRegisterBootDriverReinitialization(
         DriverObject,
         svReinitializationRoutine,
@@ -41,11 +49,426 @@ DriverEntry(
     return STATUS_SUCCESS;
 }
 
+NTSTATUS 
+svDiskFilterQueryVolumeInfo(
+    IN OUT PDEVICE_EXTENSION DeviceExtension
+)
+{
+    NTSTATUS            status;
+    HANDLE              volumeHandle = NULL;
+    OBJECT_ATTRIBUTES   objAttr;
+    IO_STATUS_BLOCK     statusBlock;
+    UNICODE_STRING      volumeDosName;
+    WCHAR               dosNameBuffer[10];
+    PUCHAR              bootSectorBuff = NULL;
+    PBOOT_SECTOR_FAT    bootSectorFat1x;
+    PBOOT_SECTOR_FAT32  bootSectorFat32;
+    PBOOT_SECTOR_NTFS   bootSectorNtfs;
+    LARGE_INTEGER       startOffset;
+    ULONG               rootDirSectors = 0;
+
+    RtlStringCbVPrintfW(dosNameBuffer, 10, L"\\??\\%c:", DeviceExtension->VolumeLetter);
+    RtlInitUnicodeString(&volumeDosName, dosNameBuffer);
+
+    InitializeObjectAttributes(
+        &objAttr,
+        &volumeDosName,
+        OBJ_CASE_INSENSITIVE,
+        NULL,
+        NULL
+    );
+
+    do 
+    {
+        status = ZwCreateFile(
+            &volumeHandle,
+            GENERIC_ALL | SYNCHRONIZE,
+            &objAttr,
+            &statusBlock,
+            NULL,
+            0,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            FILE_OPEN,
+            FILE_SYNCHRONOUS_IO_NONALERT,
+            NULL,
+            0
+        );
+        VERIFY_STATUS_BREAK(status);
+
+        bootSectorBuff = ExAllocatePool(NonPagedPool, DEFAULT_SECTOR_SIZE);
+        if (!bootSectorBuff)
+        {
+            break;
+        }
+
+        startOffset.QuadPart = 0;
+        status = ZwReadFile(
+            volumeHandle, 
+            NULL, 
+            NULL, 
+            NULL, 
+            &statusBlock, 
+            bootSectorBuff,
+            (ULONG)DEFAULT_SECTOR_SIZE,
+            &startOffset, 
+            NULL
+        );
+        VERIFY_STATUS_BREAK(status);
+
+        bootSectorFat1x = (PBOOT_SECTOR_FAT)bootSectorBuff;
+        bootSectorFat32 = (PBOOT_SECTOR_FAT32)bootSectorBuff;
+        bootSectorNtfs  = (PBOOT_SECTOR_NTFS)bootSectorBuff;
+
+        if (*(ULONG*)bootSectorFat1x->bsFileSystemType == '1TAF')
+        {            
+            DeviceExtension->SectorsPerCluster  = bootSectorFat1x->bsSecPerClus;
+            DeviceExtension->BytesPerSector     = bootSectorFat1x->bsBytesPerSec;
+            DeviceExtension->VolumeTotalSize    = (ULONGLONG)bootSectorFat1x->bsHugeSectors * (ULONGLONG)bootSectorFat1x->bsBytesPerSec;
+
+            rootDirSectors = (bootSectorFat1x->bsRootDirEnts * 32 + (bootSectorFat1x->bsBytesPerSec - 1)) / bootSectorFat1x->bsBytesPerSec;
+            DeviceExtension->FirstDataSector    = (ULONGLONG)(bootSectorFat1x->bsResSectors + bootSectorFat1x->bsFATs * bootSectorFat1x->bsFATsecs +  rootDirSectors);
+        }
+        else if (*(ULONG*)bootSectorFat32->bsFileSystemType == '3TAF')
+        {
+            DeviceExtension->SectorsPerCluster  = bootSectorFat32->bsSecPerClus;
+            DeviceExtension->BytesPerSector     = bootSectorFat32->bsBytesPerSec;
+            DeviceExtension->VolumeTotalSize    = (ULONGLONG)bootSectorFat32->bsHugeSectors * (ULONGLONG)bootSectorFat32->bsBytesPerSec;
+            DeviceExtension->FirstDataSector    = (ULONGLONG)(bootSectorFat32->bsResSectors + bootSectorFat32->bsFATs * bootSectorFat32->bsFATsecs);
+        }
+        else if (*(ULONG*)bootSectorNtfs->bsFSID == 'SFTN')
+        {
+            DeviceExtension->SectorsPerCluster  = bootSectorNtfs->bsSectorsPerCluster;
+            DeviceExtension->BytesPerSector     = bootSectorNtfs->bsBytesPerSector;
+            DeviceExtension->VolumeTotalSize    = (ULONGLONG)bootSectorNtfs->bsTotalSectors * (ULONGLONG)bootSectorFat32->bsBytesPerSec;
+            DeviceExtension->FirstDataSector    = bootSectorNtfs->bsReservedSectors;
+        }
+        else
+        {
+            break;
+        }
+
+    } while (FALSE);
+
+    if (NULL != bootSectorBuff)
+    {
+        ExFreePool(bootSectorBuff);
+    }
+
+    if (NULL != volumeHandle)
+    {
+        ZwClose(volumeHandle);
+    }
+    
+    return status;
+}
+
+NTSTATUS
+svDiskFilterInitVolumeBitmap(
+    IN WCHAR VolumeLetter,
+    IN ULONGLONG SectorCount,
+    IN ULONG SecsPerClus,
+    IN ULONGLONG StartLcn,
+    OUT PDP_BITMAP VolumeBitmap
+)
+{
+    NTSTATUS                    status;
+    HANDLE                      volumeHandle = NULL;
+    OBJECT_ATTRIBUTES           objAttr;
+    IO_STATUS_BLOCK             statusBlock;
+    UNICODE_STRING              volumeDosName;
+    WCHAR                       dosNameBuffer[10];
+    STARTING_LCN_INPUT_BUFFER   volumeStartLcn;
+    PUCHAR                      bitmapBuffer = NULL;
+    ULONG                       ClusterCount = (ULONG)(SectorCount / SecsPerClus + 1);
+    ULONG                       bitmapSize = ClusterCount / DEFAULT_BYTE_SIZE + 1;
+    ULONG                       i, j;
+    LARGE_INTEGER               offset;
+
+    RtlStringCbVPrintfW(dosNameBuffer, 10, L"\\??\\%c:", VolumeLetter);
+    RtlInitUnicodeString(&volumeDosName, dosNameBuffer);
+
+    InitializeObjectAttributes(
+        &objAttr,
+        &volumeDosName,
+        OBJ_CASE_INSENSITIVE,
+        NULL,
+        NULL
+    );
+
+    do
+    {
+        status = ZwCreateFile(
+            &volumeHandle,
+            GENERIC_ALL | SYNCHRONIZE,
+            &objAttr,
+            &statusBlock,
+            NULL,
+            0,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            FILE_OPEN,
+            FILE_SYNCHRONOUS_IO_NONALERT,
+            NULL,
+            0
+        );
+        VERIFY_STATUS_BREAK(status);
+
+        bitmapBuffer = ExAllocatePool(NonPagedPool, bitmapSize);
+        if (!bitmapBuffer)
+        {
+            status = STATUS_INSUFFICIENT_RESOURCES;
+            break;
+        }
+
+        volumeStartLcn.StartingLcn.QuadPart = 0;
+
+        //查询磁盘占用位图，以簇为单位，fat32从数据区开始算起，ntfs从bpb开始算起
+        status = ZwFsControlFile(
+            volumeHandle,
+            NULL,
+            NULL,
+            NULL,
+            &statusBlock,
+            FSCTL_GET_VOLUME_BITMAP,
+            &volumeStartLcn,
+            sizeof(volumeStartLcn),
+            bitmapBuffer,
+            bitmapSize
+        );
+        VERIFY_STATUS_BREAK(status);
+
+        //磁盘数据区前的扇区标记已占用
+        offset.QuadPart = 0;
+        DPBitmapSet(VolumeBitmap, offset, StartLcn);
+
+        for (i = 0; i < bitmapSize; i++)
+        {
+            if (BitTest(bitmapBuffer, i))
+            {
+                offset.QuadPart = StartLcn + (i * SecsPerClus);
+                DPBitmapSet(VolumeBitmap, offset, SecsPerClus);
+            }
+        }
+
+    } while (FALSE);
+
+    if (NULL != bitmapBuffer)
+    {
+        ExFreePool(bitmapBuffer);
+    }
+
+    if (NULL != volumeHandle)
+    {
+        ZwClose(volumeHandle);
+    }
+
+    return status;
+}
+
+NTSTATUS
+svDiskFilterInitBitmap(
+    IN PDEVICE_EXTENSION DeviceExtension
+)
+{
+    NTSTATUS status;
+    ULONGLONG sectorCount = DeviceExtension->VolumeTotalSize / DeviceExtension->BytesPerSector + 1;
+    ULONG regionNumber = sectorCount / (DEFAULT_BYTE_SIZE * DEFAULT_REGION_SIZE) + 1;
+
+    do
+    {
+        status = DPBitmapInit(
+            &DeviceExtension->BitmapOrigin,
+            DeviceExtension->BytesPerSector,
+            DEFAULT_BYTE_SIZE,
+            DEFAULT_REGION_SIZE,
+            regionNumber
+        );
+        VERIFY_STATUS_BREAK(status);
+
+        status = DPBitmapInit(
+            &DeviceExtension->BitmapPassthru,
+            DeviceExtension->BytesPerSector,
+            DEFAULT_BYTE_SIZE,
+            DEFAULT_REGION_SIZE,
+            regionNumber
+        );
+        VERIFY_STATUS_BREAK(status);
+
+        status = DPBitmapInit(
+            &DeviceExtension->BitmapPassthru,
+            DeviceExtension->BytesPerSector,
+            DEFAULT_BYTE_SIZE,
+            DEFAULT_REGION_SIZE,
+            regionNumber
+        );
+        VERIFY_STATUS_BREAK(status);
+
+        //初始化磁盘扇区占用位图
+        svDiskFilterInitVolumeBitmap(
+            DeviceExtension->VolumeLetter, 
+            sectorCount,
+            DeviceExtension->SectorsPerCluster,
+            DeviceExtension->FirstDataSector,
+            DeviceExtension->BitmapOrigin
+        );
+
+        //不作过滤的磁盘扇区
+        SetBitmapPassFile(
+            DeviceExtension->VolumeLetter,
+            L"\\Windows\\bootstat.dat",
+            DeviceExtension->BitmapPassthru
+        );
+
+        SetBitmapPassFile(
+            DeviceExtension->VolumeLetter,
+            L"\\pagefile.sys",
+            DeviceExtension->BitmapPassthru
+        );
+
+        SetBitmapPassFile(
+            DeviceExtension->VolumeLetter,
+            L"\\hiberfil.sys",
+            DeviceExtension->BitmapPassthru
+        );
+
+        //过滤后的磁盘扇区占用位图
+        RtlInitializeGenericTable(
+            &DeviceExtension->MapRedirect,
+            svAllocateRoutine,
+            svCompareRoutine,
+            svFreeRoutine,
+            NULL
+        );
+
+    } while (FALSE);
+
+    return status;
+}
+
+NTSTATUS
+svDiskFilterDeviceInit(
+    IN PDEVICE_EXTENSION DeviceExtension
+)
+{
+    NTSTATUS status;
+
+    do 
+    {
+        status = svDiskFilterQueryVolumeInfo(DeviceExtension);
+        VERIFY_STATUS_BREAK(status);
+
+        status = svDiskFilterInitBitmap(DeviceExtension);
+        VERIFY_STATUS_BREAK(status);
+
+        DeviceExtension->EnableProtect = TRUE;
+    } while (FALSE);
+
+    return status;
+}
+
+VOID
+svDiskFilterDriverReinit(
+)
+{
+    ULONG i;
+    for (i = 0; i < MAX_PROTECT_VOLUMNE; i++)
+    {
+        if (NULL != g_devExt[i])
+        {
+            svDiskFilterDeviceInit(g_devExt[i]);
+        }
+    }
+}
+
 VOID
 svReinitializationRoutine(
     IN PDRIVER_OBJECT DriverObject,
     IN OUT PVOID Context,
     IN ULONG Count
+)
+{
+    UNREFERENCED_PARAMETER(DriverObject);
+    UNREFERENCED_PARAMETER(Context);
+    UNREFERENCED_PARAMETER(Count);
+
+    svDiskFilterDriverReinit();
+}
+
+NTSTATUS
+SetBitmapPassFile(
+    IN WCHAR VolumeLetter,
+    IN PWCHAR FilePath,
+    IN OUT PDP_BITMAP VolumeBitmap
+)
+{
+    NTSTATUS status;
+    PRETRIEVAL_POINTERS_BUFFER retrievalPointer = NULL;
+    UNICODE_STRING symbolName;
+    UNICODE_STRING deviceName;
+    PWCHAR nameBuffer = NULL;
+    ULONG i, j, k;
+    LARGE_INTEGER prevVcn, lcn;
+
+    RtlZeroMemory(&deviceName, sizeof(deviceName));
+
+    do 
+    {
+        nameBuffer = ExAllocatePool(PagedPool, symbolName.MaximumLength);
+        if (!nameBuffer)
+        {
+            return STATUS_INSUFFICIENT_RESOURCES;
+        }
+
+        symbolName.MaximumLength = MAX_PATH * sizeof(WCHAR);
+        symbolName.Length = 0;
+        symbolName.Buffer = nameBuffer;
+
+        RtlStringCbVPrintfW(nameBuffer, MAX_PATH, L"\\??\\%c:%s", VolumeLetter, FilePath);
+        RtlInitUnicodeString(&symbolName, nameBuffer);
+
+        // \\??\\c => \\Device\\Harddiskvolume
+        status = QuerySymbolicLink(&symbolName, &deviceName);
+        VERIFY_STATUS_BREAK(status);
+
+        // 查询文件占用的磁盘簇，标记磁盘位图已占用
+        status = QueryClusterUsage(&deviceName, &retrievalPointer);
+        VERIFY_STATUS_BREAK(status);
+
+        prevVcn = retrievalPointer->StartingVcn;
+        for (i = 0, k = 0; i < retrievalPointer->ExtentCount; i++)
+        {
+            lcn = retrievalPointer->Extents[i].Lcn;
+            for (j = (ULONG)(retrievalPointer->Extents[i].NextVcn.QuadPart - prevVcn.QuadPart); j >= 0; j--, k++, lcn.QuadPart++)
+            {
+                DPBitmapSet(VolumeBitmap, lcn, 1);
+            }
+
+            prevVcn = retrievalPointer->Extents[i].NextVcn;
+        }
+
+    } while (FALSE);
+
+    if (NULL != nameBuffer)
+    {
+        ExFreePool(nameBuffer);
+    }
+
+    if (NULL != deviceName.Buffer)
+    {
+        ExFreePool(deviceName.Buffer);
+    }
+
+    if (NULL != retrievalPointer)
+    {
+        ExFreePool(retrievalPointer);
+    }
+
+    return status;
+}
+
+NTSTATUS
+QueryClusterUsage(
+    IN PUNICODE_STRING FileName,
+    OUT PRETRIEVAL_POINTERS_BUFFER* RetrievalPointer
 )
 {
 
@@ -98,7 +521,7 @@ svAddDevice(
 
         deviceExtension->FilterDevice = filterDevice;
         deviceExtension->TargetDevice = PhysicalDeviceObject;
-        deviceExtension->LowerDevice = lowerDevice;
+        deviceExtension->LowerDevice  = lowerDevice;
 
         InitializeListHead(&deviceExtension->RequestList);
         KeInitializeSpinLock(&deviceExtension->RequestLock);

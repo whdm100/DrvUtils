@@ -3,10 +3,18 @@
 
 #include <ntddk.h>
 #include <ntddvol.h>
+#include <ntdddisk.h>
+#include <ntifs.h>
+#include <ntstrsafe.h>
 
 #include "DiskBitmap.h"
+#include "DeviceUitls.h"
 
-#define DEFAULT_SECTOR_SIZE 512
+#define MAX_PROTECT_VOLUMNE 26      // 最多保护的磁盘卷数
+
+#define DEFAULT_BYTE_SIZE   8       // 每个字节可用BIT
+#define DEFAULT_SECTOR_SIZE 512     // 默认扇区字节大小
+#define DEFAULT_REGION_SIZE 256*1024// 默认磁盘位图每块大小
 
 typedef struct  _BOOT_SECTOR_FAT
 {
@@ -95,30 +103,45 @@ typedef struct _BOOT_SECTOR_NTFS {
 } BOOT_SECTOR_NTFS, *PBOOT_SECTOR_NTFS;
 
 typedef struct _DEVICE_EXTENSION {
+    BOOLEAN             EnableProtect;      // 开启磁盘卷保护
     WCHAR               VolumeLetter;       // 磁盘卷盘符
-    ULONG               EnableProtect;      // 是否开启保护
-    ULONG               SectorsPerCluster;  // 每簇大小
+    ULONG               SectorsPerCluster;  // 每簇扇区数
     ULONG               BytesPerSector;     // 每扇区大小
-    LARGE_INTEGER       VolumeTotalSize;    // 磁盘卷总大小
+    ULONGLONG           VolumeTotalSize;    // 磁盘卷总大小
+
+    PDP_BITMAP          BitmapOrigin;       // 扇区占用原始位图
+    PDP_BITMAP          BitmapRedirect;     // 重定向后转储的扇区
+    PDP_BITMAP          BitmapPassthru;     // 不做过滤的扇区,特殊文件扇区不进行转储，页面文件等
+
+    ULONGLONG           FirstDataSector;    // 数据扇区起始位置
+    ULONGLONG           NextFreeSector;     // 磁盘空闲扇区偏移
+    RTL_GENERIC_TABLE   MapRedirect;        // 扇区重定向表
+
+    ULONG               DiskPagingCount;    // 磁盘开启分页计数
+    KEVENT              DiskPagingEvent;    // 磁盘分页等待事件
+
     PDEVICE_OBJECT      FilterDevice;       // 磁盘卷过滤设备
     PDEVICE_OBJECT      TargetDevice;       // 磁盘卷设备
     PDEVICE_OBJECT      LowerDevice;        // 转发的下一个设备
-    ULONG               InitCompleted;      // 完成初始化
-    PDISK_BITMAP        DiskBitmap;         // 磁盘位图
-    HANDLE              FileDump;           // 磁盘转储文件句柄
+
     LIST_ENTRY          RequestList;        // 卷请求队列
     KSPIN_LOCK          RequestLock;        // 请求队列访问锁
     KEVENT              RequestEvent;       // 请求队列同步事件
     PVOID               ThreadHandle;       // 处理请求事件线程句柄
     BOOLEAN             ThreadTerminate;    // 线程结束标志
-    ULONG               DiskPagingCount;    // 磁盘开启分页计数
-    KEVENT              DiskPagingEvent;    // 磁盘分页等待事件
 } DEVICE_EXTENSION, *PDEVICE_EXTENSION;
 
 typedef struct _COMPLETION_CONTEXT {
     PKEVENT             SyncEvent;
     PDEVICE_EXTENSION   DeviceExtension;
 } COMPLETION_CONTEXT, *PCOMPLETION_CONTEXT;
+
+typedef struct _SECTOR_MAP_ITEM {
+    ULONGLONG   OriginOffset;
+    ULONGLONG   RedirectOffset;
+} SECTOR_MAP_ITEM, *PSECTOR_MAP_ITEM;
+
+extern PDEVICE_EXTENSION g_devExt[MAX_PROTECT_VOLUMNE];
 
 DRIVER_INITIALIZE DriverEntry;
 
@@ -130,9 +153,7 @@ DRIVER_UNLOAD svUnload;
 
 DRIVER_DISPATCH svDispatchGeneral;
 
-DRIVER_DISPATCH svDispatchRead;
-
-DRIVER_DISPATCH svDispatchWrite;
+DRIVER_DISPATCH svDispatchReadWrite;
 
 DRIVER_DISPATCH svDispatchDeviceControl;
 
@@ -141,6 +162,60 @@ DRIVER_DISPATCH svDispatchPnp;
 DRIVER_DISPATCH svDispatchPower;
 
 KSTART_ROUTINE svReadWriteThread;
+
+PRTL_GENERIC_ALLOCATE_ROUTINE svAllocateRoutine;
+
+PRTL_GENERIC_COMPARE_ROUTINE svCompareRoutine;
+
+PRTL_GENERIC_FREE_ROUTINE svFreeRoutine;
+
+NTSTATUS
+svDiskFilterQueryVolumeInfo(
+    IN OUT PDEVICE_EXTENSION DeviceExtension
+);
+
+NTSTATUS
+svDiskFilterInitVolumeBitmap(
+    IN WCHAR VolumeLetter,
+    IN ULONGLONG SectorCount,
+    IN ULONG SecsPerClus,
+    IN ULONGLONG StartLcn,
+    OUT PDP_BITMAP VolumeBitmap
+);
+
+NTSTATUS
+svDiskFilterInitBitmap(
+    IN PDEVICE_EXTENSION DeviceExtension
+);
+
+NTSTATUS
+svDiskFilterDeviceInit(
+    IN PDEVICE_EXTENSION DeviceExtension
+);
+
+VOID
+svDiskFilterDriverReinit(
+);
+
+VOID
+svReinitializationRoutine(
+    IN PDRIVER_OBJECT DriverObject,
+    IN OUT PVOID Context,
+    IN ULONG Count
+);
+
+NTSTATUS
+SetBitmapPassFile(
+    IN WCHAR VolumeLetter,
+    IN PWCHAR FilePath,
+    IN OUT PDP_BITMAP VolumeBitmap
+);
+
+NTSTATUS
+QueryClusterUsage(
+    IN PUNICODE_STRING FileName,
+    OUT PRETRIEVAL_POINTERS_BUFFER* RetrievalPointer
+);
 
 NTSTATUS
 SendToLowerDevice(
@@ -173,18 +248,16 @@ ToUpperLetter(
 );
 
 NTSTATUS
-QueryVolumeInformation(
-    IN PDEVICE_OBJECT DeviceObject,
-    OUT PULONG SectorsPerCluster,
-    OUT PULONG SizePerSector,
-    OUT PLARGE_INTEGER VolumeTotalSize
-);
-
-NTSTATUS
 svDispatchDeviceControlCompleteRoutine(
     IN PDEVICE_OBJECT DeviceObject,
     IN PIRP Irp,
     IN PVOID Context
 );
+
+#define VERIFY_STATUS_BREAK(s) \
+    if (!NT_SUCCESS((s)))   \
+    {                       \
+        break;              \
+    }
 
 #endif // _SHADOW_VOLUME_H

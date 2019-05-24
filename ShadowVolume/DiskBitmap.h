@@ -1,29 +1,80 @@
-#ifndef _BITMAP_H
-#define _BITMAP_H
+#ifndef _DP_BITMAP_H_
+#define _DP_BITMAP_H_
 
-#include <ntddk.h>
+#define BITMAP_ERR_OUTOFRANGE	-1
+#define BITMAP_ERR_ALLOCMEMORY	-2
+#define BITMAP_SUCCESS			0
+#define BITMAP_BIT_SET			1
+#define BITMAP_BIT_CLEAR		2
+#define BITMAP_BIT_UNKNOW		3
+#define BITMAP_RANGE_SET		4
+#define BITMAP_RANGE_CLEAR		5
+#define BITMAP_RANGE_BLEND		6
+#define BITMAP_RANGE_SIZE		25600
+#define BITMAP_RANGE_SIZE_SMALL 256
+#define BITMAP_RANGE_SIZE_MAX	51684
+#define BITMAP_RANGE_AMOUNT		16*1024
 
-typedef struct _DISK_BITMAP{
-    ULONG   DataLength;
-    UCHAR   DataBuffer[1];
-} DISK_BITMAP, *PDISK_BITMAP;
+typedef UCHAR tBitmap;
 
-PDISK_BITMAP 
-CreateDiskBitmap(
-    IN ULONG BitCount
+#include <pshpack1.h>
+
+typedef struct _DP_BITMAP_
+{
+    //这个卷中的每个扇区有多少字节，这同样也说明了bitmap中一个位所对应的字节数
+    ULONG       sectorSize;
+    //每个byte里面有几个bit，一般情况下是8
+    ULONG       byteSize;
+    //每个块是多大byte，
+    ULONG       regionSize;
+    //这个bitmap总共有多少个块
+    ULONG       regionNumber;
+    //这个块对应了多少个实际的byte，这个数字应该是sectorSize*byteSize*regionSize
+    ULONG       regionReferSize;
+    //这个bitmap对应了多少个实际的byte，这个数字应该是sectorSize*byteSize*regionSize*regionNumber
+    ULONGLONG   bitmapReferSize;
+    //指向bitmap存储空间的指针
+    tBitmap**   Bitmap;
+    //用于存取bitmap的锁
+    void*       lockBitmap;
+} DP_BITMAP, *PDP_BITMAP;
+
+#include <poppack.h>
+                    
+NTSTATUS 
+DPBitmapInit(
+    DP_BITMAP **	sbitmap,
+    ULONG           sectorSize,
+    ULONG           byteSize,
+    ULONG           regionSize,
+    ULONG           regionNumber
+);                  
+                    
+void
+DPBitmapFree(
+    DP_BITMAP* bitmap
 );
-
-BOOLEAN 
-DiskBitmapGetBit(
-    IN PDISK_BITMAP* Bitmap,
-    IN ULONG Offset
+                    
+NTSTATUS 
+DPBitmapSet(
+    DP_BITMAP *		bitmap,
+    LARGE_INTEGER   offset,
+    ULONG           length
+);                  
+                    
+NTSTATUS 
+DPBitmapGet(
+    DP_BITMAP *     bitmap,
+    LARGE_INTEGER   offset,
+    ULONG           length,
+    void *          bufInOut,
+    void *          bufIn
+);                  
+                    
+long
+DPBitmapTest(  
+    DP_BITMAP *     bitmap,
+    LARGE_INTEGER   offset,
+    ULONG           length
 );
-
-VOID
-DiskBitmapSetBit(
-    IN PDISK_BITMAP* Bitmap,
-    IN ULONG Offset,
-    IN BOOLEAN Bit
-);
-
-#endif // _BITMAP_H
+#endif

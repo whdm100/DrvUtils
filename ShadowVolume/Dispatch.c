@@ -1,5 +1,18 @@
 #include "ShadowVolume.h"
 
+
+NTSTATUS
+svDispatchGeneral(
+    IN PDEVICE_OBJECT DeviceObject,
+    IN PIRP Irp
+)
+{
+    PDEVICE_EXTENSION deviceExtension = (PDEVICE_EXTENSION)DeviceObject->DeviceExtension;
+
+    IoSkipCurrentIrpStackLocation(Irp);
+    return IoCallDriver(deviceExtension->LowerDevice, Irp);
+}
+
 NTSTATUS
 svDispatchPnp(
     IN PDEVICE_OBJECT DeviceObject,
@@ -39,9 +52,17 @@ svDispatchPnp(
             IoDeleteDevice(deviceExtension->FilterDevice);
         }
 
-        if (NULL != deviceExtension->DiskBitmap)
+        if (NULL != deviceExtension->BitmapOrigin)
         {
-            svBitmapFree(deviceExtension->DiskBitmap);
+            DPBitmapFree(deviceExtension->BitmapOrigin);
+        }
+        if (NULL != deviceExtension->BitmapRedirect)
+        {
+            DPBitmapFree(deviceExtension->BitmapRedirect);
+        }
+        if (NULL != deviceExtension->BitmapPassthru)
+        {
+            DPBitmapFree(deviceExtension->BitmapPassthru);
         }
 
         break;
@@ -229,6 +250,7 @@ svDispatchDeviceControl(
     {
     case IOCTL_VOLUME_ONLINE:
     {
+        //设置完成事件，等待磁盘卷设备完成 IOCTL_VOLUME_ONLINE 请求后，读取磁盘卷设备盘符
         KeInitializeEvent(&waitEvent, SynchronizationEvent, FALSE);
         completionContext.DeviceExtension = deviceExtension;
         completionContext.SyncEvent = &waitEvent;
@@ -253,7 +275,11 @@ svDispatchDeviceControl(
             NULL
         );
 
-        IoCompleteRequest(Irp, IO_NO_INCREMENT);
+        if (!NT_SUCCESS(Irp->IoStatus.Status))
+        {
+            //读取盘符失败，忽略该磁盘的过滤
+            g_devExt[(ULONG)deviceExtension->VolumeLetter] = deviceExtension;
+        }
 
         return status;
     }
@@ -284,106 +310,6 @@ ToUpperLetter(
 }
 
 NTSTATUS
-QueryVolumeInformation(
-    IN PDEVICE_OBJECT DeviceObject,
-    OUT PULONG SectorsPerCluster,
-    OUT PULONG SizePerSector,
-    OUT PLARGE_INTEGER VolumeTotalSize
-)
-{
-    NTSTATUS            status          = STATUS_SUCCESS;
-    PIRP                irp             = NULL;
-    PUCHAR              bootSectorBuff  = NULL;
-    PBOOT_SECTOR_FAT    bootSectorFat;      
-    PBOOT_SECTOR_FAT32  bootSectorFat32;
-    PBOOT_SECTOR_NTFS   bootSectorNtfs;
-    LARGE_INTEGER       startOffset;
-    IO_STATUS_BLOCK     ioStatusBlock;
-    KEVENT              waitEvent;
-
-    do 
-    {
-        bootSectorBuff = ExAllocatePool(NonPagedPool, DEFAULT_SECTOR_SIZE);
-        if (!bootSectorBuff)
-            break;
-
-        startOffset.QuadPart = 0;
-        irp = IoBuildAsynchronousFsdRequest(
-            IRP_MJ_READ,
-            DeviceObject,
-            bootSectorBuff,
-            DEFAULT_SECTOR_SIZE,
-            &startOffset,
-            &ioStatusBlock
-        );
-        if (!irp)
-            break;
-
-        KeInitializeEvent(&waitEvent, NotificationEvent, FALSE);
-        IoSetCompletionRoutine(
-            irp,
-            svDispatchPnpCompleteRoutine,
-            &waitEvent,
-            TRUE,
-            TRUE,
-            TRUE
-        );
-
-        status = IoCallDriver(DeviceObject, irp);        
-        KeWaitForSingleObject(
-            &waitEvent,
-            Executive,
-            KernelMode,
-            FALSE,
-            NULL
-        );
-
-        if (!NT_SUCCESS(irp->IoStatus.Status))
-            break;
-
-        bootSectorFat = (PBOOT_SECTOR_FAT)bootSectorBuff;
-        bootSectorFat32 = (PBOOT_SECTOR_FAT32)bootSectorBuff;
-        bootSectorNtfs = (PBOOT_SECTOR_NTFS)bootSectorBuff;
-
-        if (*(ULONG*)bootSectorFat->bsFileSystemType == '1TAF')
-        {
-            *SectorsPerCluster          = bootSectorFat->bsSecPerClus;
-            *SizePerSector              = bootSectorFat->bsBytesPerSec;
-            VolumeTotalSize->QuadPart   = (LONGLONG)bootSectorFat->bsHugeSectors * ((LONGLONG)*SizePerSector);
-        }
-        else if (*(ULONG*)bootSectorFat32->bsFileSystemType == '3TAF')
-        {
-            *SectorsPerCluster          = bootSectorFat32->bsSecPerClus;
-            *SizePerSector              = bootSectorFat32->bsBytesPerSec;
-            VolumeTotalSize->QuadPart   = (LONGLONG)bootSectorFat32->bsHugeSectors * ((LONGLONG)*SizePerSector);
-        }
-        else if (*(ULONG*)bootSectorNtfs->bsFSID == 'SFTN')
-        {
-            *SectorsPerCluster          = bootSectorNtfs->bsSectorsPerCluster;
-            *SizePerSector              = bootSectorNtfs->bsBytesPerSector;
-            VolumeTotalSize->QuadPart   = (LONGLONG)bootSectorNtfs->bsTotalSectors * ((LONGLONG)*SizePerSector);
-        }
-        else
-        {
-            status = STATUS_UNSUCCESSFUL;
-        }
-
-    } while (FALSE);
-
-    if (irp != NULL)
-    {
-        IoFreeIrp(irp);
-    }
-    
-    if (bootSectorBuff != NULL)
-    {
-        ExFreePool(bootSectorBuff);
-    }
-
-    return status;
-}
-
-NTSTATUS
 svDispatchDeviceControlCompleteRoutine(
     IN PDEVICE_OBJECT DeviceObject,
     IN PIRP Irp,
@@ -402,22 +328,7 @@ svDispatchDeviceControlCompleteRoutine(
 
     if (NT_SUCCESS(status))
     {
-        deviceExtension->VolumeLetter = ToUpperLetter(VolumeDosName.Buffer[0]);
-
-        status = QueryVolumeInformation(
-            deviceExtension->TargetDevice,
-            &deviceExtension->SectorsPerCluster,
-            &deviceExtension->BytesPerSector,
-            &deviceExtension->VolumeTotalSize
-        );
-
-        if (NT_SUCCESS(status))
-        {
-            deviceExtension->DiskBitmap = CreateDiskBitmap(
-                deviceExtension->VolumeTotalSize.QuadPart / 
-                ((LONGLONG)deviceExtension->SectorsPerCluster * (LONGLONG)deviceExtension->BytesPerSector)
-            );
-        }        
+        deviceExtension->VolumeLetter = ToUpperLetter(VolumeDosName.Buffer[0]);  
     }
     
     if (VolumeDosName.Buffer != NULL)
