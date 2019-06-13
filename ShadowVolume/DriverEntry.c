@@ -1,5 +1,5 @@
 #include "ShadowVolume.h"
-
+#include "DeviceUitls.h"
 
 #ifdef ALLOC_PRAGMA
 #pragma alloc_text(INIT, DriverEntry)
@@ -54,20 +54,21 @@ svDiskFilterQueryVolumeInfo(
     IN OUT PDEVICE_EXTENSION DeviceExtension
 )
 {
-    NTSTATUS            status;
-    HANDLE              volumeHandle = NULL;
-    OBJECT_ATTRIBUTES   objAttr;
-    IO_STATUS_BLOCK     statusBlock;
-    UNICODE_STRING      volumeDosName;
-    WCHAR               dosNameBuffer[10];
-    PUCHAR              bootSectorBuff = NULL;
-    PBOOT_SECTOR_FAT    bootSectorFat1x;
-    PBOOT_SECTOR_FAT32  bootSectorFat32;
-    PBOOT_SECTOR_NTFS   bootSectorNtfs;
-    LARGE_INTEGER       startOffset;
-    ULONG               rootDirSectors = 0;
-
-    RtlStringCbVPrintfW(dosNameBuffer, 10, L"\\??\\%c:", DeviceExtension->VolumeLetter);
+    NTSTATUS                status;
+    HANDLE                  volumeHandle = NULL;
+    OBJECT_ATTRIBUTES       objAttr;
+    IO_STATUS_BLOCK         statusBlock;
+    UNICODE_STRING          volumeDosName;
+    WCHAR                   dosNameBuffer[10];
+    PUCHAR                  bootSectorBuff = NULL;
+    PBOOT_SECTOR_FAT        bootSectorFat1x;
+    PBOOT_SECTOR_FAT32      bootSectorFat32;
+    PBOOT_SECTOR_NTFS       bootSectorNtfs;
+    LARGE_INTEGER           startOffset;
+    ULONG                   rootDirSectors = 0;
+    PARTITION_INFORMATION   partitionInfo;
+    
+    RtlStringCbPrintfW(dosNameBuffer, sizeof(dosNameBuffer), L"\\??\\%c:", DeviceExtension->VolumeLetter);
     RtlInitUnicodeString(&volumeDosName, dosNameBuffer);
 
     InitializeObjectAttributes(
@@ -80,6 +81,7 @@ svDiskFilterQueryVolumeInfo(
 
     do 
     {
+        // 打开磁盘文件对象
         status = ZwCreateFile(
             &volumeHandle,
             GENERIC_ALL | SYNCHRONIZE,
@@ -95,6 +97,23 @@ svDiskFilterQueryVolumeInfo(
         );
         VERIFY_STATUS_BREAK(status);
 
+        // 查询磁盘分区信息
+        status = ZwDeviceIoControlFile(volumeHandle,
+            NULL,
+            NULL,
+            NULL,
+            &statusBlock,
+            IOCTL_DISK_GET_PARTITION_INFO,
+            NULL,
+            0,
+            &partitionInfo,
+            sizeof(partitionInfo)
+        );
+        VERIFY_STATUS_BREAK(status);
+
+        RtlCopyMemory(&DeviceExtension->PartitionInfo, &partitionInfo, sizeof(partitionInfo));
+
+        // 读取磁盘首扇区，获取磁盘大小，扇区，数据偏移等信息（FAT12/16, FAT32, NTFS）
         bootSectorBuff = ExAllocatePool(NonPagedPool, DEFAULT_SECTOR_SIZE);
         if (!bootSectorBuff)
         {
@@ -178,13 +197,13 @@ svDiskFilterInitVolumeBitmap(
     UNICODE_STRING              volumeDosName;
     WCHAR                       dosNameBuffer[10];
     STARTING_LCN_INPUT_BUFFER   volumeStartLcn;
-    PUCHAR                      bitmapBuffer = NULL;
+    PVOID                       bitmapBuffer = NULL;
     ULONG                       ClusterCount = (ULONG)(SectorCount / SecsPerClus + 1);
     ULONG                       bitmapSize = ClusterCount / DEFAULT_BYTE_SIZE + 1;
-    ULONG                       i, j;
-    LARGE_INTEGER               offset;
+    ULONG                       i;
+    ULONGLONG                   offset;
 
-    RtlStringCbVPrintfW(dosNameBuffer, 10, L"\\??\\%c:", VolumeLetter);
+    RtlStringCbPrintfW(dosNameBuffer, 10, L"\\??\\%c:", VolumeLetter);
     RtlInitUnicodeString(&volumeDosName, dosNameBuffer);
 
     InitializeObjectAttributes(
@@ -237,14 +256,14 @@ svDiskFilterInitVolumeBitmap(
         VERIFY_STATUS_BREAK(status);
 
         //磁盘数据区前的扇区标记已占用
-        offset.QuadPart = 0;
-        DPBitmapSet(VolumeBitmap, offset, StartLcn);
+        offset = 0;
+        DPBitmapSet(VolumeBitmap, offset, (ULONG)StartLcn);    
 
         for (i = 0; i < bitmapSize; i++)
         {
             if (BitTest(bitmapBuffer, i))
             {
-                offset.QuadPart = StartLcn + (i * SecsPerClus);
+                offset = StartLcn + (i * SecsPerClus);
                 DPBitmapSet(VolumeBitmap, offset, SecsPerClus);
             }
         }
@@ -271,7 +290,7 @@ svDiskFilterInitBitmap(
 {
     NTSTATUS status;
     ULONGLONG sectorCount = DeviceExtension->VolumeTotalSize / DeviceExtension->BytesPerSector + 1;
-    ULONG regionNumber = sectorCount / (DEFAULT_BYTE_SIZE * DEFAULT_REGION_SIZE) + 1;
+    ULONG regionNumber = (ULONG)(sectorCount / (DEFAULT_BYTE_SIZE * DEFAULT_REGION_SIZE) + 1);
 
     do
     {
@@ -333,8 +352,8 @@ svDiskFilterInitBitmap(
         //过滤后的磁盘扇区占用位图
         RtlInitializeGenericTable(
             &DeviceExtension->MapRedirect,
-            svAllocateRoutine,
             svCompareRoutine,
+            svAllocateRoutine,
             svFreeRoutine,
             NULL
         );
@@ -400,47 +419,89 @@ SetBitmapPassFile(
     IN OUT PDP_BITMAP VolumeBitmap
 )
 {
-    NTSTATUS status;
-    PRETRIEVAL_POINTERS_BUFFER retrievalPointer = NULL;
-    UNICODE_STRING symbolName;
-    UNICODE_STRING deviceName;
-    PWCHAR nameBuffer = NULL;
-    ULONG i, j, k;
-    LARGE_INTEGER prevVcn, lcn;
+    NTSTATUS                    status;
+    HANDLE                      fileHandle = (HANDLE)-1;
+    OBJECT_ATTRIBUTES           objAttr;
+    IO_STATUS_BLOCK             statusBlock;
+    PEPROCESS	                systemProcess = NULL;
+    ULONG                       systemProcessId = 0;
+    PRETRIEVAL_POINTERS_BUFFER  retrievalPointer = NULL;
+    UNICODE_STRING              symbolName;
+    UNICODE_STRING              deviceName;
+    PWCHAR                      nameBuffer = NULL;
+    LARGE_INTEGER               prevVcn;
+    ULONG                       i;
 
     RtlZeroMemory(&deviceName, sizeof(deviceName));
 
     do 
     {
-        nameBuffer = ExAllocatePool(PagedPool, symbolName.MaximumLength);
-        if (!nameBuffer)
-        {
-            return STATUS_INSUFFICIENT_RESOURCES;
-        }
-
         symbolName.MaximumLength = MAX_PATH * sizeof(WCHAR);
         symbolName.Length = 0;
         symbolName.Buffer = nameBuffer;
 
-        RtlStringCbVPrintfW(nameBuffer, MAX_PATH, L"\\??\\%c:%s", VolumeLetter, FilePath);
+        nameBuffer = ExAllocatePool(PagedPool, symbolName.MaximumLength);
+        if (NULL == nameBuffer)
+        {
+            return STATUS_INSUFFICIENT_RESOURCES;
+        }
+
+        RtlStringCbPrintfW(nameBuffer, MAX_PATH, L"\\??\\%c", VolumeLetter);
         RtlInitUnicodeString(&symbolName, nameBuffer);
 
         // \\??\\c => \\Device\\Harddiskvolume
         status = QuerySymbolicLink(&symbolName, &deviceName);
         VERIFY_STATUS_BREAK(status);
 
+        RtlAppendUnicodeToString(&deviceName, FilePath);
+
+        InitializeObjectAttributes(
+            &objAttr,
+            &deviceName,
+            OBJ_CASE_INSENSITIVE,
+            NULL,
+            NULL
+        );
+
+        // 切换到SYSTEM进程
+        status = PsLookupProcessByProcessId((PVOID)systemProcessId, &systemProcess);
+        VERIFY_STATUS_BREAK(status);
+
+        KeAttachProcess(systemProcess);
+
+        status = ZwCreateFile(
+            &fileHandle,
+            GENERIC_READ | SYNCHRONIZE,
+            &objAttr,
+            &statusBlock,
+            NULL,
+            0,
+            FILE_SHARE_READ,
+            FILE_OPEN,
+            FILE_SYNCHRONOUS_IO_NONALERT,
+            NULL,
+            0
+        );
+
+        // 打开失败，在SYSTEM进程中查找文件句柄
+        if (!NT_SUCCESS(status))
+        {
+            status = SearchFileHandle(&deviceName, &fileHandle);
+        }
+        VERIFY_STATUS_BREAK(status);
+
         // 查询文件占用的磁盘簇，标记磁盘位图已占用
-        status = QueryClusterUsage(&deviceName, &retrievalPointer);
+        status = QueryClusterUsage(fileHandle, &retrievalPointer);
         VERIFY_STATUS_BREAK(status);
 
         prevVcn = retrievalPointer->StartingVcn;
-        for (i = 0, k = 0; i < retrievalPointer->ExtentCount; i++)
+        for (i = 0; i < retrievalPointer->ExtentCount; i++)
         {
-            lcn = retrievalPointer->Extents[i].Lcn;
-            for (j = (ULONG)(retrievalPointer->Extents[i].NextVcn.QuadPart - prevVcn.QuadPart); j >= 0; j--, k++, lcn.QuadPart++)
-            {
-                DPBitmapSet(VolumeBitmap, lcn, 1);
-            }
+            DPBitmapSet(
+                VolumeBitmap,
+                retrievalPointer->Extents[i].Lcn.QuadPart, 
+                (ULONG)(retrievalPointer->Extents[i].NextVcn.QuadPart - prevVcn.QuadPart)
+            );
 
             prevVcn = retrievalPointer->Extents[i].NextVcn;
         }
@@ -457,6 +518,17 @@ SetBitmapPassFile(
         ExFreePool(deviceName.Buffer);
     }
 
+    if (NULL != systemProcess)
+    {
+        KeDetachProcess();
+        ObDereferenceObject(systemProcess);
+    }
+
+    if ((HANDLE)-1 != fileHandle)
+    {
+        ZwClose(fileHandle);
+    }
+
     if (NULL != retrievalPointer)
     {
         ExFreePool(retrievalPointer);
@@ -467,11 +539,49 @@ SetBitmapPassFile(
 
 NTSTATUS
 QueryClusterUsage(
-    IN PUNICODE_STRING FileName,
+    IN HANDLE FileHandle,
     OUT PRETRIEVAL_POINTERS_BUFFER* RetrievalPointer
 )
 {
+    NTSTATUS status;
+    IO_STATUS_BLOCK iosb;
+    LARGE_INTEGER StartVcn;
+    PRETRIEVAL_POINTERS_BUFFER pVcnPairs;
+    ULONG ulOutPutSize = 0;
+    ULONG uCounts = 200;
 
+    StartVcn.QuadPart = 0;
+    ulOutPutSize = sizeof(RETRIEVAL_POINTERS_BUFFER) + uCounts * sizeof(pVcnPairs->Extents) + sizeof(LARGE_INTEGER);
+    pVcnPairs = (PRETRIEVAL_POINTERS_BUFFER)ExAllocatePool(NonPagedPool, ulOutPutSize);
+    if (NULL == pVcnPairs)
+    {
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    while ((status = ZwFsControlFile(FileHandle, NULL, NULL, 0, &iosb,
+        FSCTL_GET_RETRIEVAL_POINTERS,
+        &StartVcn, sizeof(LARGE_INTEGER),
+        pVcnPairs, ulOutPutSize)) == STATUS_BUFFER_OVERFLOW)
+    {
+        uCounts += 200;
+        ulOutPutSize = sizeof(RETRIEVAL_POINTERS_BUFFER) + uCounts * sizeof(pVcnPairs->Extents) + sizeof(LARGE_INTEGER);
+        ExFreePool(pVcnPairs);
+
+        pVcnPairs = (PRETRIEVAL_POINTERS_BUFFER)ExAllocatePool(NonPagedPool, ulOutPutSize);
+        if (NULL == pVcnPairs)
+        {
+            STATUS_INSUFFICIENT_RESOURCES;
+        }
+    }
+
+    if (!NT_SUCCESS(status))
+    {
+        ExFreePool(pVcnPairs);
+        return status;
+    }
+
+    *RetrievalPointer = pVcnPairs;
+    return status;
 }
 
 NTSTATUS
@@ -575,8 +685,10 @@ svAddDevice(
     }
 
     if (NULL != threadHandle)
+    {
         ZwClose(threadHandle);
-
+    }
+        
     return status;
 }
 

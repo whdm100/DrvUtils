@@ -66,7 +66,6 @@ DPBitmapInit(
     ULONG           regionNumber
 )
 {
-    int i = 0;
     DP_BITMAP * myBitmap = NULL;
     NTSTATUS status = STATUS_SUCCESS;
 
@@ -122,27 +121,27 @@ DPBitmapInit(
 NTSTATUS
 DPBitmapSet(
     DP_BITMAP *     bitmap,
-    LARGE_INTEGER   offset,
+    ULONGLONG       offset,
     ULONG           length
 )
 {
-    __int64 i = 0;
-    unsigned long myRegion = 0, myRegionEnd = 0;
-    unsigned long myRegionOffset = 0, myRegionOffsetEnd = 0;
-    unsigned long myByteOffset = 0, myByteOffsetEnd = 0;
-    unsigned long myBitPos = 0;
+    ULONGLONG i = 0;
+    ULONG myRegion = 0, myRegionEnd = 0;
+    ULONG myRegionOffset = 0, myRegionOffsetEnd = 0;
+    ULONG myByteOffset = 0, myByteOffsetEnd = 0;
+    ULONG myBitPos = 0;
     NTSTATUS status = STATUS_SUCCESS;
-    LARGE_INTEGER setBegin = { 0 }, setEnd = { 0 };
+    ULONGLONG setBegin = 0, setEnd = 0;
 
     __try
     {
         //检查变量
-        if (NULL == bitmap || offset.QuadPart < 0)
+        if (NULL == bitmap)
         {
             status = STATUS_INVALID_PARAMETER;
             __leave;
         }
-        if (0 != offset.QuadPart % bitmap->sectorSize || 0 != length % bitmap
+        if (0 != offset % bitmap->sectorSize || 0 != length % bitmap
             ->sectorSize)
         {
             status = STATUS_INVALID_PARAMETER;
@@ -150,8 +149,8 @@ DPBitmapSet(
         }
 
         //根据要设置的偏移量和长度来计算需要使用到哪些region，如果需要的话，就分配他们指向的内存空间
-        myRegion = (unsigned long)(offset.QuadPart / (__int64)bitmap->regionReferSize);
-        myRegionEnd = (unsigned long)((offset.QuadPart + (__int64)length) / (__int64)bitmap->regionReferSize);
+        myRegion = (ULONG)(offset / (ULONGLONG)bitmap->regionReferSize);
+        myRegionEnd = (ULONG)((offset + (ULONGLONG)length) / (ULONGLONG)bitmap->regionReferSize);
         for (i = myRegion; i <= myRegionEnd; ++i)
         {
             if (NULL == *(bitmap->Bitmap + i))
@@ -170,56 +169,56 @@ DPBitmapSet(
 
         //开始设置bitmap，首先我们需要将要设置的区域按照byte对齐，这样可以按byte设置而不需要按bit设置，加快设置速度
         //对于没有byte对齐的区域先手工设置掉他们
-        for (i = offset.QuadPart; i < offset.QuadPart + (__int64)length; i += bitmap->sectorSize)
+        for (i = offset; i < offset + (ULONGLONG)length; i += bitmap->sectorSize)
         {
-            myRegion = (unsigned long)(i / (__int64)bitmap->regionReferSize);
-            myRegionOffset = (unsigned long)(i % (__int64)bitmap->regionReferSize);
+            myRegion = (ULONG)(i / (ULONGLONG)bitmap->regionReferSize);
+            myRegionOffset = (ULONG)(i % (ULONGLONG)bitmap->regionReferSize);
             myByteOffset = myRegionOffset / bitmap->byteSize / bitmap->sectorSize;
             myBitPos = (myRegionOffset / bitmap->sectorSize) % bitmap->byteSize;
             if (0 == myBitPos)
             {
-                setBegin.QuadPart = i;
+                setBegin = i;
                 break;
             }
             *(*(bitmap->Bitmap + myRegion) + myByteOffset) |= bitmapMask[myBitPos];
         }
-        if (i >= offset.QuadPart + (__int64)length)
+        if (i >= offset + (ULONGLONG)length)
         {
             status = STATUS_SUCCESS;
             __leave;
         }
 
-        for (i = offset.QuadPart + (__int64)length - bitmap->sectorSize; i >= offset.QuadPart; i -= bitmap->sectorSize)
+        for (i = offset + (ULONGLONG)length - bitmap->sectorSize; i >= offset; i -= bitmap->sectorSize)
         {
-            myRegion = (unsigned long)(i / (__int64)bitmap->regionReferSize);
-            myRegionOffset = (unsigned long)(i % (__int64)bitmap->regionReferSize);
+            myRegion = (ULONG)(i / (ULONGLONG)bitmap->regionReferSize);
+            myRegionOffset = (ULONG)(i % (ULONGLONG)bitmap->regionReferSize);
             myByteOffset = myRegionOffset / bitmap->byteSize / bitmap->sectorSize;
             myBitPos = (myRegionOffset / bitmap->sectorSize) % bitmap->byteSize;
             if (7 == myBitPos)
             {
-                setEnd.QuadPart = i;
+                setEnd = i;
                 break;
             }
             *(*(bitmap->Bitmap + myRegion) + myByteOffset) |= bitmapMask[myBitPos];
         }
 
-        if (i < offset.QuadPart || setEnd.QuadPart == setBegin.QuadPart)
+        if (i < offset || setEnd == setBegin)
         {
             status = STATUS_SUCCESS;
             __leave;
         }
 
-        myRegionEnd = (unsigned long)(setEnd.QuadPart / (__int64)bitmap->regionReferSize);
+        myRegionEnd = (ULONG)(setEnd / (ULONGLONG)bitmap->regionReferSize);
 
-        for (i = setBegin.QuadPart; i <= setEnd.QuadPart;)
+        for (i = setBegin; i <= setEnd;)
         {
-            myRegion = (unsigned long)(i / (__int64)bitmap->regionReferSize);
-            myRegionOffset = (unsigned long)(i % (__int64)bitmap->regionReferSize);
+            myRegion = (ULONG)(i / (ULONGLONG)bitmap->regionReferSize);
+            myRegionOffset = (ULONG)(i % (ULONGLONG)bitmap->regionReferSize);
             myByteOffset = myRegionOffset / bitmap->byteSize / bitmap->sectorSize;
             //如果我们设置的区域没有跨两个region，只需要使用memset去做按byte的设置然后跳出即可
             if (myRegion == myRegionEnd)
             {
-                myRegionOffsetEnd = (unsigned long)(setEnd.QuadPart % (__int64)bitmap->regionReferSize);
+                myRegionOffsetEnd = (ULONG)(setEnd % (__int64)bitmap->regionReferSize);
                 myByteOffsetEnd = myRegionOffsetEnd / bitmap->byteSize / bitmap->sectorSize;
                 memset(*(bitmap->Bitmap + myRegion) + myByteOffset, 0xff, myByteOffsetEnd - myByteOffset + 1);
                 break;
@@ -250,28 +249,28 @@ DPBitmapSet(
 NTSTATUS
 DPBitmapGet(
     DP_BITMAP *     bitmap,
-    LARGE_INTEGER   offset,
+    ULONGLONG       offset,
     ULONG           length,
     void *          bufInOut,
     void *          bufIn
 )
 {
-    unsigned long i = 0;
-    unsigned long myRegion = 0;
-    unsigned long myRegionOffset = 0;
-    unsigned long myByteOffset = 0;
-    unsigned long myBitPos = 0;
+    ULONG i = 0;
+    ULONG myRegion = 0;
+    ULONG myRegionOffset = 0;
+    ULONG myByteOffset = 0;
+    ULONG myBitPos = 0;
     NTSTATUS status = STATUS_SUCCESS;
 
     __try
     {
         //检查参数
-        if (NULL == bitmap || offset.QuadPart < 0 || NULL == bufInOut || NULL == bufIn)
+        if (NULL == bitmap || NULL == bufInOut || NULL == bufIn)
         {
             status = STATUS_INVALID_PARAMETER;
             __leave;
         }
-        if (0 != offset.QuadPart % bitmap->sectorSize || 0 != length % bitmap->sectorSize)
+        if (0 != offset % bitmap->sectorSize || 0 != length % bitmap->sectorSize)
         {
             status = STATUS_INVALID_PARAMETER;
             __leave;
@@ -280,9 +279,9 @@ DPBitmapGet(
         //遍历需要获取的位图范围，如果出现了位被设置为1，就需要用bufIn参数中指向的相应位置的数据拷贝到bufInOut中
         for (i = 0; i < length; i += bitmap->sectorSize)
         {
-            myRegion = (unsigned long)((offset.QuadPart + (__int64)i) / (__int64)bitmap->regionReferSize);
+            myRegion = (ULONG)((offset + (ULONGLONG)i) / (ULONGLONG)bitmap->regionReferSize);
 
-            myRegionOffset = (unsigned long)((offset.QuadPart + (__int64)i) % (__int64)bitmap->regionReferSize);
+            myRegionOffset = (ULONG)((offset + (ULONGLONG)i) % (ULONGLONG)bitmap->regionReferSize);
 
             myByteOffset = myRegionOffset / bitmap->byteSize / bitmap->sectorSize;
 
@@ -304,24 +303,24 @@ DPBitmapGet(
     return status;
 }
 
-long DPBitmapTest(
-    DP_BITMAP *      bitmap,
-    LARGE_INTEGER       offset,
-    unsigned long       length
+NTSTATUS DPBitmapTestRange(
+    DP_BITMAP *     bitmap,
+    ULONGLONG       offset,
+    ULONG           length
 )
 {
     char flag = 0;
-    unsigned long i = 0;
-    unsigned long myRegion = 0;
-    unsigned long myRegionOffset = 0;
-    unsigned long myByteOffset = 0;
-    unsigned long myBitPos = 0;
-    long ret = BITMAP_BIT_UNKNOW;
+    ULONG i = 0;
+    ULONG myRegion = 0;
+    ULONG myRegionOffset = 0;
+    ULONG myByteOffset = 0;
+    ULONG myBitPos = 0;
+    NTSTATUS ret = BITMAP_BIT_UNKNOW;
 
     __try
     {
         //检查参数
-        if (NULL == bitmap || offset.QuadPart < 0 || offset.QuadPart + length > bitmap->bitmapReferSize)
+        if (NULL == bitmap || offset + length > bitmap->bitmapReferSize)
         {
             ret = BITMAP_BIT_UNKNOW;
 
@@ -331,9 +330,9 @@ long DPBitmapTest(
         for (i = 0; i < length; i += bitmap->sectorSize)
         {
             //针对需要测试的bitmap范围进行测试，如果全部为0则返回BITMAP_RANGE_CLEAR，如果全部为1，则返回BITMAP_RANGE_SET，如果为0，1混合则返回BITMAP_RANGE_BLEND
-            myRegion = (unsigned long)((offset.QuadPart + (__int64)i) / (__int64)bitmap->regionReferSize);
+            myRegion = (ULONG)((offset + (ULONGLONG)i) / (ULONGLONG)bitmap->regionReferSize);
 
-            myRegionOffset = (unsigned long)((offset.QuadPart + (__int64)i) % (__int64)bitmap->regionReferSize);
+            myRegionOffset = (ULONG)((offset + (ULONGLONG)i) % (ULONGLONG)bitmap->regionReferSize);
 
             myByteOffset = myRegionOffset / bitmap->byteSize / bitmap->sectorSize;
 
@@ -373,4 +372,66 @@ long DPBitmapTest(
     }
 
     return ret;
+}
+
+BOOLEAN DPBitmapTestBit(
+    DP_BITMAP *     bitmap,
+    ULONGLONG       offset
+)
+{
+    BOOLEAN ret;
+    ULONG myRegion = 0;
+    ULONG myRegionOffset = 0;
+    ULONG myByteOffset = 0;
+    ULONG myBitPos = 0;
+
+    __try
+    {
+        //针对需要测试的bitmap范围进行测试，如果全部为0则返回BITMAP_RANGE_CLEAR，如果全部为1，则返回BITMAP_RANGE_SET，如果为0，1混合则返回BITMAP_RANGE_BLEND
+        myRegion = (ULONG)(offset / (ULONGLONG)bitmap->regionReferSize);
+
+        myRegionOffset = offset % (ULONGLONG)bitmap->regionReferSize;
+
+        myByteOffset = myRegionOffset / bitmap->byteSize / bitmap->sectorSize;
+
+        myBitPos = (myRegionOffset / bitmap->sectorSize) % bitmap->byteSize;
+
+        if (NULL != *(bitmap->Bitmap + myRegion) && (*(*(bitmap->Bitmap + myRegion) + myByteOffset) &bitmapMask[myBitPos]))
+        {
+            ret = TRUE;
+        }
+        else
+        {
+            ret = FALSE;
+        }
+
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        ret = FALSE;
+    }
+
+    return ret;
+}
+
+ULONGLONG
+DPBitmapGetNextOffset(
+    DP_BITMAP *     bitmap,
+    ULONGLONG       start,
+    BOOLEAN         usage
+)
+{
+    ULONGLONG nextOffset = 0;
+    ULONGLONG offset;
+
+    for (offset = start; offset < bitmap->bitmapReferSize; offset += bitmap->sectorSize)
+    {
+        if (DPBitmapTestBit(bitmap, offset) != usage)
+        {
+            nextOffset = offset;
+            break;
+        }
+    }
+
+    return nextOffset;
 }

@@ -48,7 +48,7 @@ DPBitmapInit(
     ULONG           byteSize,
     ULONG           regionSize,
     ULONG           regionNumber
-);                  
+);
                     
 void
 DPBitmapFree(
@@ -58,23 +58,37 @@ DPBitmapFree(
 NTSTATUS 
 DPBitmapSet(
     DP_BITMAP *		bitmap,
-    LARGE_INTEGER   offset,
+    ULONGLONG       offset,
     ULONG           length
-);                  
+);
                     
 NTSTATUS 
 DPBitmapGet(
     DP_BITMAP *     bitmap,
-    LARGE_INTEGER   offset,
+    ULONGLONG       offset,
     ULONG           length,
     void *          bufInOut,
     void *          bufIn
-);                  
+);
                     
-long
-DPBitmapTest(  
+NTSTATUS
+DPBitmapTestRange(
     DP_BITMAP *     bitmap,
-    LARGE_INTEGER   offset,
+    ULONGLONG       offset,
     ULONG           length
 );
+
+BOOLEAN
+DPBitmapTestBit(
+    DP_BITMAP *     bitmap,
+    ULONGLONG       offset
+);
+
+ULONGLONG
+DPBitmapGetNextOffset(
+    DP_BITMAP *     bitmap,
+    ULONGLONG       start,
+    BOOLEAN         usage
+);
+
 #endif

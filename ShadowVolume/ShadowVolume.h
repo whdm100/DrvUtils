@@ -1,14 +1,12 @@
 #ifndef _SHADOW_VOLUME_H
 #define _SHADOW_VOLUME_H
 
+#include <ntifs.h>
 #include <ntddk.h>
 #include <ntddvol.h>
 #include <ntdddisk.h>
-#include <ntifs.h>
-#include <ntstrsafe.h>
 
 #include "DiskBitmap.h"
-#include "DeviceUitls.h"
 
 #define MAX_PROTECT_VOLUMNE 26      // 最多保护的磁盘卷数
 
@@ -103,32 +101,34 @@ typedef struct _BOOT_SECTOR_NTFS {
 } BOOT_SECTOR_NTFS, *PBOOT_SECTOR_NTFS;
 
 typedef struct _DEVICE_EXTENSION {
-    BOOLEAN             EnableProtect;      // 开启磁盘卷保护
-    WCHAR               VolumeLetter;       // 磁盘卷盘符
-    ULONG               SectorsPerCluster;  // 每簇扇区数
-    ULONG               BytesPerSector;     // 每扇区大小
-    ULONGLONG           VolumeTotalSize;    // 磁盘卷总大小
+    BOOLEAN                 EnableProtect;      // 开启磁盘卷保护
+    WCHAR                   VolumeLetter;       // 磁盘卷盘符
+    ULONG                   SectorsPerCluster;  // 每簇扇区数
+    ULONG                   BytesPerSector;     // 每扇区大小
+    ULONGLONG               VolumeTotalSize;    // 磁盘卷总大小
 
-    PDP_BITMAP          BitmapOrigin;       // 扇区占用原始位图
-    PDP_BITMAP          BitmapRedirect;     // 重定向后转储的扇区
-    PDP_BITMAP          BitmapPassthru;     // 不做过滤的扇区,特殊文件扇区不进行转储，页面文件等
+    PARTITION_INFORMATION   PartitionInfo;        // 磁盘分区信息
 
-    ULONGLONG           FirstDataSector;    // 数据扇区起始位置
-    ULONGLONG           NextFreeSector;     // 磁盘空闲扇区偏移
-    RTL_GENERIC_TABLE   MapRedirect;        // 扇区重定向表
+    PDP_BITMAP              BitmapOrigin;       // 扇区占用原始位图
+    PDP_BITMAP              BitmapRedirect;     // 重定向后转储的扇区
+    PDP_BITMAP              BitmapPassthru;     // 不做过滤的扇区,特殊文件扇区不进行转储，页面文件等
 
-    ULONG               DiskPagingCount;    // 磁盘开启分页计数
-    KEVENT              DiskPagingEvent;    // 磁盘分页等待事件
+    ULONGLONG               FirstDataSector;    // 数据扇区起始位置
+    ULONGLONG               NextFreeSector;     // 磁盘空闲扇区偏移
+    RTL_GENERIC_TABLE       MapRedirect;        // 扇区重定向表
 
-    PDEVICE_OBJECT      FilterDevice;       // 磁盘卷过滤设备
-    PDEVICE_OBJECT      TargetDevice;       // 磁盘卷设备
-    PDEVICE_OBJECT      LowerDevice;        // 转发的下一个设备
+    LONG                    DiskPagingCount;    // 磁盘开启分页计数
+    KEVENT                  DiskPagingEvent;    // 磁盘分页等待事件
 
-    LIST_ENTRY          RequestList;        // 卷请求队列
-    KSPIN_LOCK          RequestLock;        // 请求队列访问锁
-    KEVENT              RequestEvent;       // 请求队列同步事件
-    PVOID               ThreadHandle;       // 处理请求事件线程句柄
-    BOOLEAN             ThreadTerminate;    // 线程结束标志
+    PDEVICE_OBJECT          FilterDevice;       // 磁盘卷过滤设备
+    PDEVICE_OBJECT          TargetDevice;       // 磁盘卷设备
+    PDEVICE_OBJECT          LowerDevice;        // 转发的下一个设备
+
+    LIST_ENTRY              RequestList;        // 卷请求队列
+    KSPIN_LOCK              RequestLock;        // 请求队列访问锁
+    KEVENT                  RequestEvent;       // 请求队列同步事件
+    PVOID                   ThreadHandle;       // 处理请求事件线程句柄
+    BOOLEAN                 ThreadTerminate;    // 线程结束标志
 } DEVICE_EXTENSION, *PDEVICE_EXTENSION;
 
 typedef struct _COMPLETION_CONTEXT {
@@ -163,11 +163,37 @@ DRIVER_DISPATCH svDispatchPower;
 
 KSTART_ROUTINE svReadWriteThread;
 
-PRTL_GENERIC_ALLOCATE_ROUTINE svAllocateRoutine;
+RTL_GENERIC_COMPARE_RESULTS
+NTAPI
+svCompareRoutine(
+    IN PRTL_GENERIC_TABLE Table,
+    IN PVOID FirstStruct,
+    IN PVOID SecondStruct
+);
 
-PRTL_GENERIC_COMPARE_ROUTINE svCompareRoutine;
+PVOID
+NTAPI
+svAllocateRoutine(
+    IN PRTL_GENERIC_TABLE Table,
+    IN CLONG ByteSize
+);
 
-PRTL_GENERIC_FREE_ROUTINE svFreeRoutine;
+VOID
+NTAPI
+svFreeRoutine(
+    IN PRTL_GENERIC_TABLE Table,
+    IN PVOID Buffer
+);
+
+NTSTATUS
+svHandleDiskRequest(
+    IN PDEVICE_EXTENSION DeviceExtension,
+    IN ULONG MajorFunction,
+    IN PIRP Irp,
+    IN PUCHAR Buffer,
+    IN ULONGLONG Offset,
+    IN ULONG Length
+);
 
 NTSTATUS
 svDiskFilterQueryVolumeInfo(
@@ -213,7 +239,7 @@ SetBitmapPassFile(
 
 NTSTATUS
 QueryClusterUsage(
-    IN PUNICODE_STRING FileName,
+    IN HANDLE FileHandle,
     OUT PRETRIEVAL_POINTERS_BUFFER* RetrievalPointer
 );
 
@@ -238,7 +264,7 @@ svDispatchPnpCompleteRoutine(
 
 VOID
 IoAdjustPagingCount(
-    IN volatile PULONG PagingCount,
+    IN volatile PLONG PagingCount,
     IN BOOLEAN InPath
 );
 

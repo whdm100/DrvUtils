@@ -1,4 +1,3 @@
-
 #include "DeviceUitls.h"
 
 //ÊäÈë\\??\\c:-->\\device\\harddiskvolume1
@@ -219,7 +218,6 @@ GetNtDeviceName(
     WCHAR * pPath = NULL;
     int i = 0;
 
-
     RtlStringCbCopyW(tmpName, MAX_PATH * sizeof(WCHAR), filename);
 
     for (i = 1; i < MAX_PATH - 1; i++)
@@ -257,4 +255,101 @@ GetNtDeviceName(
     }
 
     return FALSE;
+}
+
+PVOID 
+QuerySystemInformation(
+    IN SYSTEM_INFORMATION_CLASS InfoClass
+)
+{
+    NTSTATUS status;
+    ULONG retSize, infoSize = 0x400;
+    PVOID systemInfo;
+
+    while (1)
+    {
+        if ((systemInfo = ExAllocatePool(NonPagedPool, infoSize)) == NULL)
+        {
+            return NULL;
+        }
+
+        status = ZwQuerySystemInformation(InfoClass, systemInfo, infoSize, &retSize);
+        if (status == STATUS_INFO_LENGTH_MISMATCH)
+        {
+            ExFreePool(systemInfo);
+            infoSize += 0x400;
+        }
+        else
+        {
+            break;
+        }
+    }
+
+    if (!NT_SUCCESS(status))
+    {
+        if (systemInfo)
+        {
+            ExFreePool(systemInfo);
+        }
+        return NULL;
+    }
+
+    return systemInfo;
+}
+
+NTSTATUS
+SearchFileHandle(
+    IN PUNICODE_STRING FilePath,
+    OUT PHANDLE FileHandle
+)
+{
+    NTSTATUS status = STATUS_UNSUCCESSFUL;
+    ULONG i;
+    PVOID sysBuffer = NULL;
+    PSYSTEM_HANDLE_INFORMATION pProcesses;
+    POBJECT_NAME_INFORMATION ObjectName;
+    ULONG systemProcessId = 0;
+
+    char ObjectNameBuf[1024];
+    ULONG ReturnLen;
+
+    *FileHandle = (HANDLE)-1;
+
+    ObjectName = (POBJECT_NAME_INFORMATION)ObjectNameBuf;
+    ObjectName->Name.MaximumLength = 510;
+
+    sysBuffer = QuerySystemInformation(SystemHandleInformation);
+
+    if (NULL == sysBuffer)
+    {        
+        return status;
+    }
+
+    pProcesses = (PSYSTEM_HANDLE_INFORMATION)((PULONG)sysBuffer + 4);
+    for (i = 0; i < (*(ULONG*)sysBuffer); i++)
+    {
+        if (pProcesses[i].ProcessId == systemProcessId)
+        {
+            status = ZwQueryObject(
+                (HANDLE)pProcesses[i].Handle, 
+                2/*ObjectNameInfo*/,
+                ObjectName, 
+                sizeof(ObjectNameBuf),
+                &ReturnLen
+            );
+
+            if (NT_SUCCESS(status) && (RtlEqualUnicodeString(&ObjectName->Name, FilePath, TRUE) == TRUE))
+            {
+                *FileHandle = (HANDLE)pProcesses[i].Handle;
+                break;
+            }
+        }
+    }
+
+    if (NULL != sysBuffer)
+    {
+        ExFreePool(sysBuffer);
+    }
+
+    return status;
 }
